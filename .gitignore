@@ -1,0 +1,28 @@
+# Binarios
+agente_diagnostico.exe
+*.exe
+
+# Dependencias Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archivos de diagnostico (personales)
+diagnostico_*.json
+alertas_activas.json
+historial_diagnostico.json
+
+# Build
+build/
+dist/
+
+# Test
+*_test.go
