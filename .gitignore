@@ -1,8 +1,10 @@
 # Binarios
-agente_diagnostico.exe
+winCheckAgent.exe
 *.exe
 
-# Dependencias Go
+# Go
+go.mod
+go.sum
 vendor/
 
 # IDE
@@ -17,6 +19,7 @@ Thumbs.db
 
 # Archivos de diagnostico (personales)
 diagnostico_*.json
+diagnostico_rapido_*.json
 alertas_activas.json
 historial_diagnostico.json
 
