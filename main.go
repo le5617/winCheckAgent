@@ -31,6 +31,61 @@ type ComputerInfo struct {
 	Fabricante       string `json:"fabricante,omitempty"`
 	Modelo           string `json:"modelo,omitempty"`
 	NumeroSerie      string `json:"numero_serie,omitempty"`
+	Producto         string `json:"producto,omitempty"`
+}
+
+type HardwareInfo struct {
+	Discos     []DiskInfo    `json:"discos"`
+	Bateria    BatteryInfo   `json:"bateria"`
+	BIOS       BIOSInfo      `json:"bios"`
+	Procesador ProcessorInfo `json:"procesador"`
+	RAM        RAMInfo       `json:"ram"`
+}
+
+type DiskInfo struct {
+	Unidad         string  `json:"unidad"`
+	Modelo         string  `json:"modelo"`
+	NumeroSerie    string  `json:"numero_serie"`
+	SaludPorcent   float64 `json:"salud_porcentaje"`
+	Temperatura    float64 `json:"temperatura"`
+	LecturaErrores int64   `json:"errores_lectura"`
+	Reasignados    int64   `json:"sectores_reasignados"`
+	Pendientes     int64   `json:"sectores_pendientes"`
+	Estado         string  `json:"estado"`
+}
+
+type BatteryInfo struct {
+	Nombre          string  `json:"nombre"`
+	Estado          string  `json:"estado"`
+	CargaPorcent    float64 `json:"carga_porcentaje"`
+	SaludPorcent    float64 `json:"salud_porcentaje"`
+	CapacidadDiseno int64   `json:"capacidad_diseno_mwh"`
+	CapacidadActual int64   `json:"capacidad_actual_mwh"`
+	Ciclos          int     `json:"ciclos"`
+	TiempoRestante  int     `json:"tiempo_restante_minutos"`
+}
+
+type BIOSInfo struct {
+	Version     string `json:"version"`
+	Fecha       string `json:"fecha"`
+	Fabricante  string `json:"fabricante"`
+	NumeroSerie string `json:"numero_serie"`
+}
+
+type ProcessorInfo struct {
+	Nombre        string `json:"nombre"`
+	Fabricante    string `json:"fabricante"`
+	Nucleos       int    `json:"nucleos_fisicos"`
+	Threads       int    `json:"hilos"`
+	FrecuenciaMax int    `json:"frecuencia_max_mhz"`
+	Identificador string `json:"identificador"`
+}
+
+type RAMInfo struct {
+	TotalGB          float64 `json:"total_gb"`
+	SlotsUsados      int     `json:"slots_usados"`
+	SlotsDisponibles int     `json:"slots_disponibles"`
+	Velocidad        int     `json:"velocidad_mhz"`
 }
 
 type SystemInfo struct {
@@ -150,6 +205,7 @@ type ProcessInfo struct {
 type DiagnosticReport struct {
 	Fecha     string        `json:"fecha"`
 	Equipo    ComputerInfo  `json:"equipo"`
+	Hardware  HardwareInfo  `json:"hardware"`
 	Sistema   SystemInfo    `json:"sistema"`
 	Red       NetworkInfo   `json:"red"`
 	Seguridad SecurityInfo  `json:"seguridad"`
@@ -188,6 +244,7 @@ var seguridad SecurityInfo
 var servicios []ServiceInfo
 var procesos []ProcessInfo
 var software SoftwareInfo
+var hardware HardwareInfo
 
 func addReport(category, message, level string) {
 	entry := ReportEntry{
@@ -639,6 +696,7 @@ func saveReport(filename string) {
 	dr := DiagnosticReport{
 		Fecha:     time.Now().Format("2006-01-02 15:04:05"),
 		Equipo:    equipo,
+		Hardware:  hardware,
 		Sistema:   sistema,
 		Red:       red,
 		Seguridad: seguridad,
@@ -1149,6 +1207,301 @@ func runSecurityAudit() {
 	getAutorunEntries()
 	getBrowserExtensions()
 	checkVulnerabilities()
+	collectHardwareInfo()
+}
+
+func collectHardwareInfo() {
+	getDiskHealth()
+	getBatteryHealth()
+	getBIOSInfo()
+	getProcessorInfo()
+	getRAMInfo()
+}
+
+func getDiskHealth() {
+	addReport("HARDWARE", "=== SALUD DEL DISCO (S.M.A.R.T.) ===", "INFO")
+
+	output := runPowerShell("Get-PhysicalDisk | Select-Object FriendlyName, SerialNumber, MediaType, OperationalStatus, HealthStatus | ConvertTo-Json")
+
+	if output != "" && output != "null" {
+		var disks []map[string]interface{}
+		if err := json.Unmarshal([]byte(output), &disks); err == nil {
+			for _, disk := range disks {
+				diskInfo := DiskInfo{}
+
+				if name, ok := disk["FriendlyName"].(string); ok {
+					diskInfo.Modelo = name
+				}
+				if serial, ok := disk["SerialNumber"].(string); ok {
+					diskInfo.NumeroSerie = serial
+				}
+				if status, ok := disk["OperationalStatus"].(string); ok {
+					diskInfo.Estado = status
+				}
+				if health, ok := disk["HealthStatus"].(string); ok {
+					if health == "Healthy" {
+						diskInfo.SaludPorcent = 100
+					} else {
+						diskInfo.SaludPorcent = 0
+					}
+				}
+
+				smartData := runPowerShell(fmt.Sprintf("Get-StorageReliabilityCounter -PhysicalDisk (Get-PhysicalDisk | Where-Object { $_.FriendlyName -eq '%s' }) | ConvertTo-Json", diskInfo.Modelo))
+				if smartData != "" && smartData != "null" {
+					var smart map[string]interface{}
+					if err := json.Unmarshal([]byte(smartData), &smart); err == nil {
+						if temp, ok := smart["Temperature"].(float64); ok {
+							diskInfo.Temperatura = temp
+						}
+						if readErrors, ok := smart["ReadErrorCount"].(float64); ok {
+							diskInfo.LecturaErrores = int64(readErrors)
+						}
+						if reallocated, ok := smart["ReallocatedSectorsCount"].(float64); ok {
+							diskInfo.Reasignados = int64(reallocated)
+						}
+						if pending, ok := smart["PendingSectorCount"].(float64); ok {
+							diskInfo.Pendientes = int64(pending)
+						}
+					}
+				}
+
+				hardware.Discos = append(hardware.Discos, diskInfo)
+				addReport("HARDWARE", fmt.Sprintf("Disco: %s - Serie: %s - Estado: %s", diskInfo.Modelo, diskInfo.NumeroSerie, diskInfo.Estado), "INFO")
+
+				if diskInfo.Temperatura > 0 {
+					addReport("HARDWARE", fmt.Sprintf("  Temperatura: %.1f°C", diskInfo.Temperatura), "INFO")
+				}
+				if diskInfo.Reasignados > 0 || diskInfo.Pendientes > 0 {
+					addReport("HARDWARE", fmt.Sprintf("  ALERTA: Sectores reasignados: %d, Pendientes: %d", diskInfo.Reasignados, diskInfo.Pendientes), "WARNING")
+				}
+			}
+		}
+	}
+
+	output = runPowerShell("Get-WmiObject -Class Win32_DiskDrive | Select-Object Model, SerialNumber, Size, Status | ConvertTo-Json")
+	if output != "" && output != "null" {
+		var disks []map[string]interface{}
+		if err := json.Unmarshal([]byte(output), &disks); err == nil {
+			for _, disk := range disks {
+				if len(hardware.Discos) == 0 || hardware.Discos[0].Modelo == "" {
+					diskInfo := DiskInfo{}
+					if model, ok := disk["Model"].(string); ok {
+						diskInfo.Modelo = model
+					}
+					if serial, ok := disk["SerialNumber"].(string); ok {
+						diskInfo.NumeroSerie = serial
+					}
+					if status, ok := disk["Status"].(string); ok {
+						diskInfo.Estado = status
+					}
+					hardware.Discos = append(hardware.Discos, diskInfo)
+				}
+			}
+		}
+	}
+}
+
+func getBatteryHealth() {
+	addReport("HARDWARE", "=== SALUD DE BATERÍA ===", "INFO")
+
+	output := runPowerShell("Get-WmiObject -Class Win32_Battery | Select-Object Name, EstimatedChargeRemaining, EstimatedRunTime, BatteryStatus, DesignCapacity, FullChargeCapacity | ConvertTo-Json")
+
+	if output != "" && output != "null" {
+		var battery map[string]interface{}
+		if err := json.Unmarshal([]byte(output), &battery); err == nil {
+			bat := BatteryInfo{}
+
+			if name, ok := battery["Name"].(string); ok {
+				bat.Nombre = name
+			}
+			if charge, ok := battery["EstimatedChargeRemaining"].(float64); ok {
+				bat.CargaPorcent = charge
+			}
+			if runtime, ok := battery["EstimatedRunTime"].(float64); ok {
+				bat.TiempoRestante = int(runtime)
+			}
+			if status, ok := battery["BatteryStatus"].(float64); ok {
+				switch int(status) {
+				case 1:
+					bat.Estado = "Desconectado"
+				case 2:
+					bat.Estado = "Conectado - Alta carga"
+				case 3:
+					bat.Estado = "Conectado - Baja carga"
+				case 4:
+					bat.Estado = "Conectado - Cargando"
+				case 5:
+					bat.Estado = "Conectado - Cargado"
+				case 6:
+					bat.Estado = "Conectado - Carga baja"
+				case 7:
+					bat.Estado = "Conectado - Cargando"
+				case 8:
+					bat.Estado = "Conectado - Cargando"
+				case 9:
+					bat.Estado = "Desconocido"
+				case 10:
+					bat.Estado = "Desconectado"
+				case 11:
+					bat.Estado = "Cargando"
+				default:
+					bat.Estado = "Desconocido"
+				}
+			}
+			if designCap, ok := battery["DesignCapacity"].(float64); ok {
+				bat.CapacidadDiseno = int64(designCap)
+			}
+			if fullCap, ok := battery["FullChargeCapacity"].(float64); ok {
+				bat.CapacidadActual = int64(fullCap)
+			}
+
+			if bat.CapacidadDiseno > 0 && bat.CapacidadActual > 0 {
+				bat.SaludPorcent = float64(bat.CapacidadActual) / float64(bat.CapacidadDiseno) * 100
+			}
+
+			output = runPowerShell("Get-WmiObject -Class BatteryFullChargedCapacity | Select-Object FullChargedCapacity")
+			if output != "" {
+				var cycles map[string]interface{}
+				if err := json.Unmarshal([]byte(output), &cycles); err == nil {
+					if fc, ok := cycles["FullChargedCapacity"].(float64); ok {
+						bat.CapacidadActual = int64(fc)
+						if bat.CapacidadDiseno > 0 {
+							bat.SaludPorcent = float64(bat.CapacidadActual) / float64(bat.CapacidadDiseno) * 100
+						}
+					}
+				}
+			}
+
+			hardware.Bateria = bat
+
+			addReport("HARDWARE", fmt.Sprintf("Batería: %s", bat.Nombre), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Carga: %.0f%%", bat.CargaPorcent), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Estado: %s", bat.Estado), "INFO")
+
+			if bat.SaludPorcent > 0 {
+				addReport("HARDWARE", fmt.Sprintf("Salud de batería: %.1f%%", bat.SaludPorcent), "INFO")
+				if bat.SaludPorcent < 80 {
+					addReport("HARDWARE", fmt.Sprintf("ALERTA: Salud de batería baja (%.1f%%). Considerar reemplazo", bat.SaludPorcent), "WARNING")
+				}
+			}
+
+			if bat.CapacidadDiseno > 0 && bat.CapacidadActual > 0 {
+				addReport("HARDWARE", fmt.Sprintf("Capacidad diseño: %d mWh", bat.CapacidadDiseno), "INFO")
+				addReport("HARDWARE", fmt.Sprintf("Capacidad actual: %d mWh", bat.CapacidadActual), "INFO")
+			}
+		}
+	} else {
+		addReport("HARDWARE", "No se detectó batería (equipo de escritorio)", "INFO")
+	}
+}
+
+func getBIOSInfo() {
+	addReport("HARDWARE", "=== INFORMACIÓN BIOS ===", "INFO")
+
+	output := runPowerShell("Get-WmiObject -Class Win32_BIOS | Select-Object Manufacturer, Name, Version, SerialNumber, ReleaseDate | ConvertTo-Json")
+
+	if output != "" && output != "null" {
+		var bios map[string]interface{}
+		if err := json.Unmarshal([]byte(output), &bios); err == nil {
+			b := BIOSInfo{}
+			if mfr, ok := bios["Manufacturer"].(string); ok {
+				b.Fabricante = mfr
+			}
+			if name, ok := bios["Name"].(string); ok {
+				b.Version = name
+			}
+			if ver, ok := bios["Version"].(string); ok {
+				b.Version = ver
+			}
+			if serial, ok := bios["SerialNumber"].(string); ok {
+				b.NumeroSerie = serial
+			}
+			if date, ok := bios["ReleaseDate"].(string); ok {
+				b.Fecha = date
+			}
+			hardware.BIOS = b
+
+			addReport("HARDWARE", fmt.Sprintf("Fabricante: %s", b.Fabricante), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Versión: %s", b.Version), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Número de serie: %s", b.NumeroSerie), "INFO")
+
+			if equipo.NumeroSerie == "" {
+				equipo.NumeroSerie = b.NumeroSerie
+			}
+		}
+	}
+}
+
+func getProcessorInfo() {
+	addReport("HARDWARE", "=== PROCESADOR ===", "INFO")
+
+	output := runPowerShell("Get-WmiObject -Class Win32_Processor | Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, ProcessorId | ConvertTo-Json")
+
+	if output != "" && output != "null" {
+		var cpu map[string]interface{}
+		if err := json.Unmarshal([]byte(output), &cpu); err == nil {
+			p := ProcessorInfo{}
+			if name, ok := cpu["Name"].(string); ok {
+				p.Nombre = strings.TrimSpace(name)
+			}
+			if mfr, ok := cpu["Manufacturer"].(string); ok {
+				p.Fabricante = mfr
+			}
+			if cores, ok := cpu["NumberOfCores"].(float64); ok {
+				p.Nucleos = int(cores)
+			}
+			if threads, ok := cpu["NumberOfLogicalProcessors"].(float64); ok {
+				p.Threads = int(threads)
+			}
+			if freq, ok := cpu["MaxClockSpeed"].(float64); ok {
+				p.FrecuenciaMax = int(freq)
+			}
+			if id, ok := cpu["ProcessorId"].(string); ok {
+				p.Identificador = id
+			}
+			hardware.Procesador = p
+
+			addReport("HARDWARE", fmt.Sprintf("Procesador: %s", p.Nombre), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Núcleos: %d, Hilos: %d", p.Nucleos, p.Threads), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Frecuencia máxima: %d MHz", p.FrecuenciaMax), "INFO")
+		}
+	}
+}
+
+func getRAMInfo() {
+	addReport("HARDWARE", "=== MEMORIA RAM ===", "INFO")
+
+	output := runPowerShell("Get-WmiObject -Class Win32_PhysicalMemory | Select-Object Capacity, Speed, MemoryType, FormFactor | ConvertTo-Json")
+
+	if output != "" && output != "null" {
+		var mem []map[string]interface{}
+		if err := json.Unmarshal([]byte(output), &mem); err == nil {
+			var totalRAM int64
+			var velocidad int
+			slots := 0
+
+			for _, m := range mem {
+				if cap, ok := m["Capacity"].(float64); ok {
+					totalRAM += int64(cap)
+					slots++
+				}
+				if speed, ok := m["Speed"].(float64); ok {
+					velocidad = int(speed)
+				}
+			}
+
+			r := RAMInfo{
+				TotalGB:     float64(totalRAM) / (1024 * 1024 * 1024),
+				SlotsUsados: slots,
+				Velocidad:   velocidad,
+			}
+			hardware.RAM = r
+
+			addReport("HARDWARE", fmt.Sprintf("Total RAM: %.1f GB", r.TotalGB), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Slots utilizados: %d", r.SlotsUsados), "INFO")
+			addReport("HARDWARE", fmt.Sprintf("Velocidad: %d MHz", r.Velocidad), "INFO")
+		}
+	}
 }
 
 func getInstalledSoftware() {
