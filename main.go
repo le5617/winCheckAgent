@@ -820,7 +820,7 @@ func main() {
 		case "--completo", "-c":
 			runFullDiagnostic()
 		default:
-			fmt.Println("Uso: agente-diagnostico [--rapido|--monitor [segundos]|--completo]")
+			fmt.Println("Uso: ciberox-endpoint [--rapido|--monitor [segundos]|--completo]")
 		}
 	} else {
 		for {

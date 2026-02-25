@@ -1,10 +1,8 @@
 # Binarios
-winCheckAgent.exe
+ciberox-endpoint.exe
 *.exe
 
 # Go
-go.mod
-go.sum
 vendor/
 
 # IDE
