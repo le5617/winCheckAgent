@@ -603,64 +603,67 @@ func printReport() {
 }
 
 func runFullDiagnostic() {
-	fmt.Println("=" + strings.Repeat("=", 59))
-	fmt.Println("  AGENTE DE DIAGNOSTICO AVANZADO WINDOWS (Go)")
-	fmt.Println("=" + strings.Repeat("=", 59))
+	fmt.Println(strings.Repeat("=", 60))
+	fmt.Println("  CIBEROX ENDPOINT - DIAGNOSTICO COMPLETO")
+	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf("Fecha: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
 
-	fmt.Println("[1/18] Obteniendo informacion del sistema...")
+	fmt.Println("[1/19] Obteniendo informacion del sistema...")
 	getSystemInfo()
 
-	fmt.Println("[2/18] Verificando CPU...")
+	fmt.Println("[2/19] Verificando CPU...")
 	checkCPU()
 
-	fmt.Println("[3/18] Verificando memoria...")
+	fmt.Println("[3/19] Verificando memoria...")
 	checkMemory()
 
-	fmt.Println("[4/18] Verificando disco...")
+	fmt.Println("[4/19] Verificando disco...")
 	checkDisk()
 
-	fmt.Println("[5/18] Verificando red...")
+	fmt.Println("[5/19] Verificando red...")
 	checkNetwork()
 
-	fmt.Println("[6/18] Verificando bateria...")
+	fmt.Println("[6/19] Verificando bateria...")
 	checkBattery()
 
-	fmt.Println("[7/18] Verificando procesos...")
+	fmt.Println("[7/19] Verificando procesos...")
 	checkProcesses()
 
-	fmt.Println("[8/18] Analizando BSOD...")
+	fmt.Println("[8/19] Analizando BSOD...")
 	checkBSOD()
 
-	fmt.Println("[9/18] Verificando SMART del disco...")
+	fmt.Println("[9/19] Verificando SMART del disco...")
 	checkSMART()
 
-	fmt.Println("[10/18] Escaneando malware...")
+	fmt.Println("[10/19] Escaneando malware...")
 	checkMalware()
 
-	fmt.Println("[11/18] Verificando drivers...")
+	fmt.Println("[11/19] Verificando drivers...")
 	checkDrivers()
 
-	fmt.Println("[12/18] Verificando integridad del sistema...")
+	fmt.Println("[12/19] Verificando integridad del sistema...")
 	checkSystemIntegrity()
 
-	fmt.Println("[13/18] Verificando Windows Update...")
+	fmt.Println("[13/19] Verificando Windows Update...")
 	checkWindowsUpdate()
 
-	fmt.Println("[14/18] Verificando servicios...")
+	fmt.Println("[14/19] Verificando servicios...")
 	checkServices()
 
-	fmt.Println("[15/18] Verificando programas de inicio...")
+	fmt.Println("[15/19] Verificando programas de inicio...")
 	checkStartup()
 
-	fmt.Println("[16/18] Verificando red avanzada...")
+	fmt.Println("[16/19] Verificando red avanzada...")
 	checkNetworkAdvanced()
 
-	fmt.Println("[17/18] Verificando dispositivos USB...")
+	fmt.Println("[17/19] Verificando dispositivos USB...")
 	checkUSB()
 
-	fmt.Println("[18/18] Leyendo logs de Windows...")
+	fmt.Println("[18/19] Leyendo logs de Windows...")
 	checkLogs()
+
+	fmt.Println("[19/19] Ejecutando auditoría de seguridad...")
+	runSecurityAudit()
 
 	fmt.Println("\nGenerando recomendaciones...")
 	generateRecommendations()
@@ -773,14 +776,15 @@ func showHistory() {
 
 func showMenu() {
 	fmt.Println("\n" + strings.Repeat("=", 60))
-	fmt.Println("  AGENTE DE DIAGNOSTICO WINDOWS - MENU PRINCIPAL")
+	fmt.Println("  CIBEROX ENDPOINT - MENU PRINCIPAL")
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println("\n1. Diagnostico completo")
 	fmt.Println("2. Diagnostico rapido")
-	fmt.Println("3. Monitoreo en tiempo real (10s)")
-	fmt.Println("4. Ver alertas activas")
-	fmt.Println("5. Ver historial")
-	fmt.Println("6. Salir")
+	fmt.Println("3. Auditoria de seguridad")
+	fmt.Println("4. Monitoreo en tiempo real (10s)")
+	fmt.Println("5. Ver alertas activas")
+	fmt.Println("6. Ver historial")
+	fmt.Println("7. Salir")
 
 	fmt.Print("\nSelecciona una opcion: ")
 
@@ -794,12 +798,17 @@ func showMenu() {
 	case "2":
 		runQuickDiagnostic()
 	case "3":
-		runMonitor(10)
+		report = nil
+		alertas = nil
+		runSecurityAudit()
+		saveReport("auditoria_seguridad.json")
 	case "4":
-		showAlerts()
+		runMonitor(10)
 	case "5":
-		showHistory()
+		showAlerts()
 	case "6":
+		showHistory()
+	case "7":
 		fmt.Println("\n¡Hasta luego!")
 	default:
 		fmt.Println("\nOpcion invalida")
@@ -827,4 +836,341 @@ func main() {
 			showMenu()
 		}
 	}
+}
+
+func getComputerInfo() {
+	addReport("EQUIPO", "=== INFORMACIÓN DEL EQUIPO ===", "INFO")
+
+	output := runPowerShell("(Get-CimInstance Win32_ComputerSystem).Name")
+	if output != "" {
+		addReport("EQUIPO", fmt.Sprintf("Nombre del equipo: %s", output), "INFO")
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Domain")
+	if output != "" {
+		addReport("EQUIPO", fmt.Sprintf("Dominio/Grupo de trabajo: %s", output), "INFO")
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).DomainRole")
+	if output != "" {
+		role := ""
+		switch output {
+		case "0":
+			role = "Estación de trabajo"
+		case "1":
+			role = "Estación de trabajo (miembro de dominio)"
+		case "2":
+			role = "Servidor miembro"
+		case "3":
+			role = "Servidor miembro (miembro de dominio)"
+		case "4":
+			role = "Controlador de dominio"
+		case "5":
+			role = "Controlador de dominio (primario)"
+		}
+		if role != "" {
+			addReport("EQUIPO", fmt.Sprintf("Rol: %s", role), "INFO")
+		}
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_OperatingSystem).Caption")
+	if output != "" {
+		addReport("EQUIPO", fmt.Sprintf("Sistema operativo: %s", output), "INFO")
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_OperatingSystem).Version")
+	if output != "" {
+		addReport("EQUIPO", fmt.Sprintf("Versión: %s", output), "INFO")
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Manufacturer")
+	if output != "" {
+		addReport("EQUIPO", fmt.Sprintf("Fabricante: %s", output), "INFO")
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Model")
+	if output != "" {
+		addReport("EQUIPO", fmt.Sprintf("Modelo: %s", output), "INFO")
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_BIOS).SerialNumber")
+	if output != "" {
+		addReport("EQUIPO", fmt.Sprintf("Número de serie: %s", output), "INFO")
+	}
+}
+
+func getListeningPorts() {
+	addReport("SEGURIDAD", "=== PUERTOS EN ESCUCHA ===", "INFO")
+
+	connections, err := net.Connections("tcp")
+	if err != nil {
+		addReport("SEGURIDAD", "Error al obtener conexiones TCP", "WARNING")
+		return
+	}
+
+	ports := make(map[string]string)
+	for _, conn := range connections {
+		if conn.Status == "LISTEN" {
+			proc, err := process.NewProcess(int32(conn.Pid))
+			procName := "desconocido"
+			if err == nil {
+				procName, _ = proc.Name()
+			}
+			portKey := fmt.Sprintf("%d", conn.Laddr.Port)
+			if _, exists := ports[portKey]; !exists {
+				ports[portKey] = procName
+			}
+		}
+	}
+
+	knownPorts := map[string]string{
+		"80":   "HTTP",
+		"443":  "HTTPS",
+		"22":   "SSH",
+		"21":   "FTP",
+		"25":   "SMTP",
+		"53":   "DNS",
+		"3306": "MySQL",
+		"5432": "PostgreSQL",
+		"3389": "RDP",
+		"135":  "RPC",
+		"139":  "NetBIOS",
+		"445":  "SMB",
+		"5985": "WinRM",
+		"5986": "WinRM SSL",
+	}
+
+	suspiciousPorts := []string{"4444", "5555", "6666", "6667", "31337", "12345"}
+
+	for port, proc := range ports {
+		service := knownPorts[port]
+		if service == "" {
+			service = "desconocido"
+		}
+
+		level := "INFO"
+		msg := fmt.Sprintf("Puerto %s (%s) - Proceso: %s", port, service, proc)
+
+		for _, susp := range suspiciousPorts {
+			if port == susp {
+				level = "CRITICAL"
+				msg = fmt.Sprintf("PUERTO SOSPECHOSO: %s", msg)
+				break
+			}
+		}
+		addReport("SEGURIDAD", msg, level)
+	}
+
+	if len(ports) == 0 {
+		addReport("SEGURIDAD", "No se detectaron puertos en escucha", "WARNING")
+	}
+}
+
+func getSecurityPatches() {
+	addReport("SEGURIDAD", "=== PARCHES DE SEGURIDAD ===", "INFO")
+
+	output := runPowerShell("Get-HotFix | Sort-Object -Property InstalledOn -Descending | Select-Object -First 10 | Format-Table -AutoSize")
+
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				addReport("SEGURIDAD", fmt.Sprintf("HotFix: %s", strings.TrimSpace(line)), "INFO")
+			}
+		}
+	}
+
+	output = runPowerShell("(Get-CimInstance Win32_QuickFixEngineering | Sort-Object -Property InstalledOn -Descending | Select-Object -First 1).InstalledOn")
+	if output != "" {
+		addReport("SEGURIDAD", fmt.Sprintf("Último parche instalado: %s", output), "INFO")
+	}
+
+	output = runPowerShell("$days = (Get-Date) - (Get-CimInstance Win32_QuickFixEngineering | Sort-Object -Property InstalledOn -Descending | Select-Object -First 1).InstalledOn; Write-Output $days.Days")
+	if output != "" {
+		days := strings.TrimSpace(output)
+		addReport("SEGURIDAD", fmt.Sprintf("Días desde último parche: %s", days), "INFO")
+	}
+
+	checkPatchAge(output)
+}
+
+func checkPatchAge(daysStr string) {
+	days := 0
+	fmt.Sscanf(daysStr, "%d", &days)
+
+	if days > 30 {
+		addReport("SEGURIDAD", fmt.Sprintf("ALERTA: %d días sin parches de seguridad", days), "CRITICAL")
+	} else if days > 14 {
+		addReport("SEGURIDAD", fmt.Sprintf("ADVERTENCIA: %d días sin parches", days), "WARNING")
+	}
+}
+
+func getPasswordPolicy() {
+	addReport("SEGURIDAD", "=== POLÍTICAS DE CONTRASEÑA ===", "INFO")
+
+	output := runPowerShell("net user %USERNAME%")
+	if output != "The command completed with one or more errors." {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			if strings.Contains(line, "Local Group Memberships") || strings.Contains(line, "Administrator") {
+				addReport("SEGURIDAD", fmt.Sprintf("Usuario %s: %s", os.Getenv("USERNAME"), strings.TrimSpace(line)), "INFO")
+			}
+		}
+	}
+
+	isAdmin := runPowerShell("net session")
+	if isAdmin != "The command completed with one or more errors." {
+		addReport("SEGURIDAD", "El usuario tiene privilegios de ADMINISTRADOR", "CRITICAL")
+	} else {
+		addReport("SEGURIDAD", "El usuario NO tiene privilegios de administrador", "INFO")
+	}
+
+	output = runPowerShell("net localgroup Administrators")
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		addReport("SEGURIDAD", "Usuarios con privilegios de Administrador:", "INFO")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.Contains(line, "The command completed") && !strings.Contains(line, "Members") && !strings.Contains(line, "---") {
+				addReport("SEGURIDAD", fmt.Sprintf("  - %s", line), "INFO")
+			}
+		}
+	}
+}
+
+func getUserList() {
+	addReport("SEGURIDAD", "=== USUARIOS LOCALES ===", "INFO")
+
+	output := runPowerShell("Get-LocalUser | Select-Object Name, Enabled, LastLogon | Format-Table -AutoSize")
+
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				addReport("SEGURIDAD", fmt.Sprintf("Usuario: %s", strings.TrimSpace(line)), "INFO")
+			}
+		}
+	}
+
+	addReport("SEGURIDAD", "Cuentas habilitadas/deshabilitadas:", "INFO")
+	output = runPowerShell("Get-LocalUser | Select-Object Name, Enabled | ConvertTo-Json")
+	if output != "" {
+		addReport("SEGURIDAD", output, "INFO")
+	}
+}
+
+func getUSBDevices() {
+	addReport("SEGURIDAD", "=== DISPOSITIVOS USB ===", "INFO")
+
+	output := runPowerShell("Get-PnpDevice -Class USB -Status OK | Select-Object FriendlyName, Manufacturer, Status | Format-Table -AutoSize")
+
+	if output != "" && !strings.Contains(output, "No objects") {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				addReport("SEGURIDAD", fmt.Sprintf("USB: %s", strings.TrimSpace(line)), "INFO")
+			}
+		}
+	}
+
+	addReport("SEGURIDAD", "Historial de dispositivos USB conectados:", "INFO")
+	output = runPowerShell("Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USBSTOR\\*\\*' | Select-Object DeviceDesc, FriendlyName, Service | Format-Table -AutoSize")
+
+	if output != "" && !strings.Contains(output, "Cannot find") {
+		lines := strings.Split(output, "\n")
+		count := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" && count < 10 {
+				addReport("SEGURIDAD", fmt.Sprintf("USBSTOR: %s", strings.TrimSpace(line)), "INFO")
+				count++
+			}
+		}
+	} else {
+		addReport("SEGURIDAD", "No se encontró historial de dispositivos USB", "WARNING")
+	}
+}
+
+func getPrinters() {
+	addReport("SEGURIDAD", "=== IMPRESORAS Y DISPOSITIVOS ===", "INFO")
+
+	output := runPowerShell("Get-Printer | Select-Object Name, PortName, Status | Format-Table -AutoSize")
+
+	if output != "" && !strings.Contains(output, "No objects") {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				addReport("SEGURIDAD", fmt.Sprintf("Impresora: %s", strings.TrimSpace(line)), "INFO")
+			}
+		}
+	} else {
+		addReport("SEGURIDAD", "No se detectaron impresoras", "INFO")
+	}
+
+	addReport("SEGURIDAD", "Dispositivos de red:", "INFO")
+	output = runPowerShell("Get-NetAdapter | Select-Object Name, Status, MacAddress, LinkSpeed | Format-Table -AutoSize")
+
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				addReport("SEGURIDAD", fmt.Sprintf("Adaptador: %s", strings.TrimSpace(line)), "INFO")
+			}
+		}
+	}
+}
+
+func getFirewallStatus() {
+	addReport("SEGURIDAD", "=== ESTADO DEL FIREWALL ===", "INFO")
+
+	profiles := []string{"Domain", "Public", "Private"}
+	for _, profile := range profiles {
+		output := runPowerShell(fmt.Sprintf("(Get-NetFirewallProfile -Name '%s').Enabled", profile))
+		enabled := strings.TrimSpace(output) == "True"
+		status := "DESACTIVADO"
+		level := "CRITICAL"
+		if enabled {
+			status = "ACTIVADO"
+			level = "INFO"
+		}
+		addReport("SEGURIDAD", fmt.Sprintf("Firewall %s: %s", profile, status), level)
+	}
+
+	addReport("SEGURIDAD", "=== REGLAS DE FIREWALL PELIGROSAS ===", "INFO")
+
+	output := runPowerShell("Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and ($_.Profile -eq 'Any' -or $_.Profile -contains 'Any') } | Select-Object -First 10 DisplayName, Direction, Action, Profile | Format-Table -AutoSize")
+
+	if output != "" && !strings.Contains(output, "No objects") {
+		addReport("SEGURIDAD", "Reglas 'Permitir todo' (Inbound Any/Any):", "WARNING")
+		lines := strings.Split(output, "\n")
+		count := 0
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" && count < 5 {
+				addReport("SEGURIDAD", fmt.Sprintf("  %s", strings.TrimSpace(line)), "WARNING")
+				count++
+			}
+		}
+	}
+
+	addReport("SEGURIDAD", "Reglas con puertos abiertos expuestos:", "INFO")
+	output = runPowerShell("Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' } | Where-Object { $_.LocalPort -ne 'Any' } | Select-Object DisplayName, LocalPort, RemotePort | Sort-Object LocalPort -Unique | Select-Object -First 15 | Format-Table -AutoSize")
+
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) != "" {
+				addReport("SEGURIDAD", fmt.Sprintf("  %s", strings.TrimSpace(line)), "INFO")
+			}
+		}
+	}
+}
+
+func runSecurityAudit() {
+	getComputerInfo()
+	getListeningPorts()
+	getSecurityPatches()
+	getPasswordPolicy()
+	getUserList()
+	getUSBDevices()
+	getPrinters()
+	getFirewallStatus()
 }
