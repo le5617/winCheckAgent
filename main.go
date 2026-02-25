@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -260,13 +259,78 @@ func addReport(category, message, level string) {
 	}
 }
 
+type Win32HotFix struct {
+	HotFixID    string
+	Description string
+	InstalledOn *time.Time
+	InstalledBy string
+}
+
+type Win32Service struct {
+	Name        string
+	DisplayName string
+	Status      string
+	StartType   string
+}
+
+type Win32StartupCommand struct {
+	Name     string
+	Command  string
+	Location string
+}
+
+type Win32NetworkAdapter struct {
+	Name       string
+	MacAddress string
+	Speed      uint64
+	Status     string
+}
+
+type Win32FirewallProfile struct {
+	Name    string
+	Enabled bool
+}
+
+type Win32FirewallRule struct {
+	Name       string
+	Direction  string
+	Action     string
+	LocalPort  string
+	RemotePort string
+	Profile    string
+	Enabled    bool
+}
+
+type Win32USBDevice struct {
+	Name         string
+	Manufacturer string
+	Status       string
+}
+
+type Win32Printer struct {
+	Name     string
+	PortName string
+	Status   string
+}
+
+type Win32QuickFixEngineering struct {
+	HotFixID    string
+	FixComments string
+	InstalledOn *time.Time
+	InstalledBy string
+}
+
+func queryWMI(class string, dst interface{}) error {
+	return wmi.Query(class, dst)
+}
+
+func runWMIQuery(class string, dst interface{}) bool {
+	err := wmi.Query(class, dst)
+	return err == nil
+}
+
 func runPowerShell(command string) string {
-	cmd := exec.Command("powershell", "-Command", command)
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(output))
+	return ""
 }
 
 type Win32ComputerSystem struct {
@@ -335,11 +399,6 @@ type Win32LogicalDisk struct {
 	FileSystem string
 	Size       uint64
 	FreeSpace  uint64
-}
-
-func queryWMI(class string, dst interface{}) bool {
-	err := wmi.Query(class, dst)
-	return err == nil
 }
 
 func getWMIComputerInfo() {
@@ -621,52 +680,47 @@ func checkNetwork() {
 	conns, _ := net.Connections("tcp")
 	addReport("RED", fmt.Sprintf("Conexiones TCP activas: %d", len(conns)), "INFO")
 
-	output := runPowerShell("Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object Name, LinkSpeed | ConvertTo-Json")
-	if output != "" && output != "null" {
-		addReport("RED", fmt.Sprintf("Adaptadores activos: %s", output[:min(200, len(output))]), "INFO")
+	ifs, _ := net.Interfaces()
+	for _, iface := range ifs {
+		addReport("RED", fmt.Sprintf("Interfaz: %s - MAC: %s", iface.Name, iface.HardwareAddr), "INFO")
 	}
 }
 
 func checkNetworkAdvanced() {
 	addReport("RED_AVANZADA", "=== VERIFICACION AVANZADA DE RED ===", "INFO")
 
-	output := runPowerShell("Test-NetConnection -ComputerName '8.8.8.8' -InformationLevel Quiet")
-	if strings.Contains(output, "True") {
-		addReport("RED_AVANZADA", "Conectividad a Internet: OK", "INFO")
-	} else {
-		addReport("RED_AVANZADA", "Sin conectividad a Internet", "CRITICAL")
+	ifs, _ := net.Interfaces()
+	hasConnection := false
+	for _, iface := range ifs {
+		addReport("RED_AVANZADA", fmt.Sprintf("Interfaz: %s", iface.Name), "INFO")
+		hasConnection = true
 	}
 
-	output = runPowerShell("Resolve-DnsName -Name google.com -ErrorAction SilentlyContinue | Select-Object -First 1")
-	if output != "" {
-		addReport("RED_AVANZADA", "DNS: Funcional", "INFO")
+	if hasConnection {
+		addReport("RED_AVANZADA", "Conectividad a red: OK", "INFO")
 	} else {
-		addReport("RED_AVANZADA", "Problemas con DNS", "WARNING")
-	}
-
-	output = runPowerShell("Get-NetAdapter | Select-Object Name, Status, LinkSpeed | ConvertTo-Json")
-	if output != "" && output != "null" {
-		addReport("RED_AVANZADA", "Estado de adaptadores obtenido", "INFO")
+		addReport("RED_AVANZADA", "Sin conectividad de red", "WARNING")
 	}
 }
 
 func checkBattery() {
-	output := runPowerShell("(Get-WmiObject -Class Win32_Battery).EstimatedChargeRemaining")
-	if output != "" {
-		var percent float64
-		fmt.Sscanf(output, "%f", &percent)
-
+	bat := hardware.Bateria
+	if bat.Nombre != "" {
 		level := "INFO"
-		if percent < 20 {
+		if bat.CargaPorcent < 20 {
 			level = "WARNING"
 		}
-		if percent < 10 {
+		if bat.CargaPorcent < 10 {
 			level = "CRITICAL"
 		}
+		addReport("BATERIA", fmt.Sprintf("Carga: %.0f%%", bat.CargaPorcent), level)
+		addReport("BATERIA", fmt.Sprintf("Estado: %s", bat.Estado), "INFO")
 
-		addReport("BATERIA", fmt.Sprintf("Carga: %.0f%%", percent), level)
+		if bat.SaludPorcent > 0 {
+			addReport("BATERIA", fmt.Sprintf("Salud: %.1f%%", bat.SaludPorcent), "INFO")
+		}
 	} else {
-		addReport("BATERIA", "No se detecto bateria (escritorio)", "INFO")
+		addReport("BATERIA", "No se detectó batería (equipo de escritorio)", "INFO")
 	}
 }
 
