@@ -9,7 +9,7 @@
 https://www.virustotal.com/gui/file/88640d81e553bd644864b31e05d470cb321224887ec7a2e71c5c67d8418f9e36
 
 ## Resultados
-*(Pega aquí los resultados del análisis de VirusTotal)*
+
 
 ### Detección
 - **Motores que detectan**: X/71
