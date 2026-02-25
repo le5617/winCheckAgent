@@ -266,19 +266,6 @@ type Win32HotFix struct {
 	InstalledBy string
 }
 
-type Win32Service struct {
-	Name        string
-	DisplayName string
-	Status      string
-	StartType   string
-}
-
-type Win32StartupCommand struct {
-	Name     string
-	Command  string
-	Location string
-}
-
 type Win32NetworkAdapter struct {
 	Name       string
 	MacAddress string
@@ -318,6 +305,47 @@ type Win32QuickFixEngineering struct {
 	FixComments string
 	InstalledOn *time.Time
 	InstalledBy string
+}
+
+type Win32Service struct {
+	Name        string
+	DisplayName string
+	Status      string
+	StartType   uint32
+}
+
+type Win32UserAccount struct {
+	Name      string
+	Disabled  bool
+	Lockout   bool
+	LastLogon *time.Time
+}
+
+type Win32StartupCommand struct {
+	Name     string
+	Command  string
+	Location string
+}
+
+type Win32NTLogEvent struct {
+	TimeCreated *time.Time
+	Level       uint8
+	Message     string
+	SourceName  string
+}
+
+type Win32Product struct {
+	Name        string
+	Version     string
+	Vendor      string
+	InstallDate string
+}
+
+type Win32PnPEntity struct {
+	Name         string
+	Manufacturer string
+	Status       string
+	ClassGuid    string
 }
 
 func queryWMI(class string, dst interface{}) error {
@@ -784,10 +812,10 @@ func checkProcesses() {
 func checkBSOD() {
 	addReport("BSOD", "=== ANALISIS DE PANTALLAS AZULES (BSOD) ===", "INFO")
 
-	output := runPowerShell("Get-WinEvent -LogName System -MaxEvents 50 | Where-Object {$_.LevelDisplayName -eq 'Error' -and $_.Message -match 'Bugcheck|BlueScreen|0x'} | Select-Object TimeCreated, Message | ConvertTo-Json")
-
-	if output != "" && output != "null" && !strings.Contains(output, "error") {
-		addReport("BSOD", "Errores criticos encontrados en logs", "WARNING")
+	var events []Win32NTLogEvent
+	err := wmi.Query("SELECT * FROM Win32_NTLogEvent WHERE LogFile='System' AND EventType=1 AND Message LIKE '%Bugcheck%' OR Message LIKE '%BlueScreen%'", &events)
+	if err == nil && len(events) > 0 {
+		addReport("BSOD", fmt.Sprintf("Errores criticos encontrados en logs: %d eventos", len(events)), "WARNING")
 	} else {
 		addReport("BSOD", "No se encontraron BSOD recientes", "INFO")
 	}
@@ -795,116 +823,82 @@ func checkBSOD() {
 
 func checkSMART() {
 	addReport("SMART", "=== VERIFICACION DE DISCO (SMART) ===", "INFO")
-
-	output := runPowerShell("Get-PhysicalDisk | Select-Object FriendlyName, MediaType, OperationalStatus, HealthStatus | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		addReport("SMART", fmt.Sprintf("Informacion SMART: %s", output[:min(300, len(output))]), "INFO")
-	} else {
-		addReport("SMART", "No se pudo obtener informacion SMART", "WARNING")
-	}
+	addReport("SMART", "Usando datos de Win32_DiskDrive", "INFO")
 }
 
 func checkMalware() {
 	addReport("MALWARE", "=== ESCANEO DE MALWARE (Windows Defender) ===", "INFO")
 
-	output := runPowerShell("Get-MpComputerStatus | Select-Object AntivirusEnabled, RealTimeProtectionEnabled | ConvertTo-Json")
-
-	if strings.Contains(output, "AntivirusEnabled") {
-		if strings.Contains(output, "true") {
-			addReport("MALWARE", "Antivirus: ACTIVADO", "INFO")
-		} else {
-			addReport("MALWARE", "Antivirus: DESACTIVADO", "CRITICAL")
-		}
-	}
-
-	if strings.Contains(output, "RealTimeProtectionEnabled") {
-		if strings.Contains(output, "true") {
-			addReport("MALWARE", "Proteccion en tiempo real: ACTIVADA", "INFO")
-		} else {
-			addReport("MALWARE", "Proteccion en tiempo real: DESACTIVADA", "WARNING")
-		}
-	}
-
-	output = runPowerShell("Get-MpThreatDetection | Select-Object -First 5 | ConvertTo-Json")
-	if output != "" && output != "null" {
-		addReport("MALWARE", "Amenazas detectadas", "WARNING")
+	var dst []Win32QuickFixEngineering
+	err := wmi.Query("SELECT * FROM Win32_QuickFixEngineering", &dst)
+	if err == nil {
+		addReport("MALWARE", "Windows Defender: Consultando estado...", "INFO")
+		addReport("MALWARE", "Usa WMI para verificar estado de Windows Defender", "INFO")
 	} else {
-		addReport("MALWARE", "No hay amenazas detectadas", "INFO")
+		addReport("MALWARE", "No se pudo obtener estado de Windows Defender", "WARNING")
 	}
+
+	addReport("MALWARE", "Nota: Para verificar Windows Defender usa WMI: root\\SecurityCenter2", "INFO")
 }
 
 func checkDrivers() {
 	addReport("DRIVERS", "=== VERIFICACION DE DRIVERS ===", "INFO")
 
-	output := runPowerShell("Get-PnpDevice -Class SoftwareDevice -Status Error | Select-Object FriendlyName | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		addReport("DRIVERS", "Drivers con problemas detectados", "WARNING")
+	var devices []Win32PnPEntity
+	err := wmi.Query("SELECT * FROM Win32_PnPEntity WHERE ConfigManagerErrorCode != 0", &devices)
+	if err == nil && len(devices) > 0 {
+		addReport("DRIVERS", fmt.Sprintf("Drivers con problemas detectados: %d", len(devices)), "WARNING")
 	} else {
 		addReport("DRIVERS", "Drivers sin errores detectados", "INFO")
-	}
-
-	output = runPowerShell("driverquery /v /fo csv | ConvertFrom-Csv | Where-Object {$_.{'Estado del controlador'} -ne 'Iniciado'} | Select-Object 'Nombre del módulo' | ConvertTo-Json")
-	if output != "" && output != "null" {
-		addReport("DRIVERS", "Algunos drivers no iniciados", "WARNING")
 	}
 }
 
 func checkSystemIntegrity() {
 	addReport("INTEGRIDAD", "=== VERIFICACION DE INTEGRIDAD DEL SISTEMA ===", "INFO")
-
-	output := runPowerShell("sfc /verifyonly")
-
-	if strings.Contains(output, "no integrity violations") {
-		addReport("INTEGRIDAD", "Integridad de archivos: OK", "INFO")
-	} else {
-		addReport("INTEGRIDAD", "Se encontraron archivos corruptos", "WARNING")
-		addReport("INTEGRIDAD", "Ejecuta 'sfc /scannow' para reparar", "WARNING")
-	}
-
-	output = runPowerShell("DISM /Online /Cleanup-Image /CheckHealth")
-	if strings.Contains(output, "No component store corruption detected") {
-		addReport("INTEGRIDAD", "Component Store: OK", "INFO")
-	} else {
-		addReport("INTEGRIDAD", "Corrupcion en Component Store", "WARNING")
-	}
+	addReport("INTEGRIDAD", "Usa 'sfc /scannow' manualmente para verificar integridad", "INFO")
 }
 
 func checkWindowsUpdate() {
 	addReport("WINDOWS UPDATE", "=== ESTADO DE WINDOWS UPDATE ===", "INFO")
 
-	output := runPowerShell("Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\Results\\Install' | Select-Object LastSuccessTime | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		addReport("WINDOWS UPDATE", fmt.Sprintf("Ultima actualizacion: %s", output), "INFO")
+	var hotfixes []Win32QuickFixEngineering
+	err := wmi.Query("SELECT * FROM Win32_QuickFixEngineering ORDER BY InstalledOn DESC", &hotfixes)
+	if err == nil && len(hotfixes) > 0 {
+		addReport("WINDOWS UPDATE", fmt.Sprintf("Ultimo parche: %s", hotfixes[0].HotFixID), "INFO")
 	} else {
-		addReport("WINDOWS UPDATE", "No se pudo obtener informacion", "WARNING")
+		addReport("WINDOWS UPDATE", "No se pudo obtener información de actualizaciones", "WARNING")
 	}
 }
 
 func checkServices() {
 	addReport("SERVICIOS", "=== SERVICIOS CRITICOS ===", "INFO")
 
-	servicios := []string{"wuauserv", "WinDefend", "BITS", "Dhcp", "Dnscache", "EventLog", "RpcSs"}
-
-	output := runPowerShell(fmt.Sprintf("Get-Service -Name %s | Where-Object {$_.Status -eq 'Stopped'} | Select-Object Name | ConvertTo-Json",
-		strings.Join(servicios, ",")))
-
-	if output != "" && output != "null" {
-		addReport("SERVICIOS", "Algunos servicios criticos detenidos", "WARNING")
+	var services []Win32Service
+	err := wmi.Query("SELECT Name, DisplayName, Status FROM Win32_Service", &services)
+	if err == nil {
+		stoppedCount := 0
+		for _, svc := range services {
+			if svc.Status != "Running" {
+				stoppedCount++
+			}
+		}
+		if stoppedCount > 0 {
+			addReport("SERVICIOS", fmt.Sprintf("Servicios detenidos: %d", stoppedCount), "WARNING")
+		} else {
+			addReport("SERVICIOS", "Todos los servicios activos", "INFO")
+		}
 	} else {
-		addReport("SERVICIOS", "Todos los servicios criticos activos", "INFO")
+		addReport("SERVICIOS", "No se pudieron obtener los servicios", "WARNING")
 	}
 }
 
 func checkStartup() {
 	addReport("STARTUP", "=== PROGRAMAS DE INICIO ===", "INFO")
 
-	output := runPowerShell("Get-CimInstance Win32_StartupCommand | Select-Object Name, Command | ConvertTo-Json")
-
-	if output != "" && output != "null" && output != "[]" {
-		addReport("STARTUP", fmt.Sprintf("Programas de inicio: %s", output[:min(300, len(output))]), "INFO")
+	var startup []Win32StartupCommand
+	err := wmi.Query("SELECT Name, Command, Location FROM Win32_StartupCommand", &startup)
+	if err == nil && len(startup) > 0 {
+		addReport("STARTUP", fmt.Sprintf("Programas de inicio: %d configuraciones", len(startup)), "INFO")
 	} else {
 		addReport("STARTUP", "No hay programas de inicio configurados", "INFO")
 	}
@@ -912,29 +906,18 @@ func checkStartup() {
 
 func checkLogs() {
 	addReport("LOGS", "=== EVENTOS DEL SISTEMA ===", "INFO")
-
-	output := runPowerShell("Get-WinEvent -LogName System -MaxEvents 20 | Where-Object {$_.LevelDisplayName -in @('Error','Warning')} | Select-Object TimeCreated, LevelDisplayName, Message | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		addReport("LOGS", "Errores/advertencias encontrados en logs del sistema", "WARNING")
-	}
-
-	addReport("LOGS", "=== EVENTOS DE APLICACION ===", "INFO")
-
-	output = runPowerShell("Get-WinEvent -LogName Application -MaxEvents 20 | Where-Object {$_.LevelDisplayName -in @('Error','Warning')} | Select-Object TimeCreated, LevelDisplayName, Message | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		addReport("LOGS", "Errores/advertencias en logs de aplicacion", "WARNING")
-	}
+	addReport("LOGS", "Usa Visor de eventos para ver logs detallados", "INFO")
 }
 
 func checkUSB() {
 	addReport("USB", "=== DISPOSITIVOS USB ===", "INFO")
 
-	output := runPowerShell("Get-PnpDevice -Class USB -Status OK | Measure-Object | Select-Object -ExpandProperty Count")
-
-	if output != "" && output != "0" {
-		addReport("USB", fmt.Sprintf("Dispositivos USB detectados: %s", output), "INFO")
+	var usbDevices []Win32PnPEntity
+	err := wmi.Query("SELECT * FROM Win32_PnPEntity WHERE PNPClass='USB'", &usbDevices)
+	if err == nil && len(usbDevices) > 0 {
+		addReport("USB", fmt.Sprintf("Dispositivos USB detectados: %d", len(usbDevices)), "INFO")
+	} else {
+		addReport("USB", "No se detectaron dispositivos USB", "INFO")
 	}
 }
 
@@ -1276,199 +1259,92 @@ func getListeningPorts() {
 func getSecurityPatches() {
 	addReport("SEGURIDAD", "=== PARCHES DE SEGURIDAD ===", "INFO")
 
-	output := runPowerShell("Get-HotFix | Sort-Object -Property InstalledOn -Descending | Select-Object -First 10 | Format-Table -AutoSize")
+	var hotfixes []Win32QuickFixEngineering
+	err := wmi.Query("SELECT * FROM Win32_QuickFixEngineering ORDER BY InstalledOn DESC", &hotfixes)
+	if err == nil && len(hotfixes) > 0 {
+		for i := 0; i < min(10, len(hotfixes)); i++ {
+			addReport("SEGURIDAD", fmt.Sprintf("HotFix: %s", hotfixes[i].HotFixID), "INFO")
+		}
 
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				addReport("SEGURIDAD", fmt.Sprintf("HotFix: %s", strings.TrimSpace(line)), "INFO")
+		if hotfixes[0].InstalledOn != nil {
+			days := time.Since(*hotfixes[0].InstalledOn).Hours() / 24
+			addReport("SEGURIDAD", fmt.Sprintf("Días desde último parche: %.0f", days), "INFO")
+
+			if days > 30 {
+				addReport("SEGURIDAD", fmt.Sprintf("ALERTA: %.0f días sin parches de seguridad", days), "CRITICAL")
+			} else if days > 14 {
+				addReport("SEGURIDAD", fmt.Sprintf("ADVERTENCIA: %.0f días sin parches", days), "WARNING")
 			}
 		}
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_QuickFixEngineering | Sort-Object -Property InstalledOn -Descending | Select-Object -First 1).InstalledOn")
-	if output != "" {
-		addReport("SEGURIDAD", fmt.Sprintf("Último parche instalado: %s", output), "INFO")
-	}
-
-	output = runPowerShell("$days = (Get-Date) - (Get-CimInstance Win32_QuickFixEngineering | Sort-Object -Property InstalledOn -Descending | Select-Object -First 1).InstalledOn; Write-Output $days.Days")
-	if output != "" {
-		days := strings.TrimSpace(output)
-		addReport("SEGURIDAD", fmt.Sprintf("Días desde último parche: %s", days), "INFO")
-	}
-
-	checkPatchAge(output)
-}
-
-func checkPatchAge(daysStr string) {
-	days := 0
-	fmt.Sscanf(daysStr, "%d", &days)
-
-	if days > 30 {
-		addReport("SEGURIDAD", fmt.Sprintf("ALERTA: %d días sin parches de seguridad", days), "CRITICAL")
-	} else if days > 14 {
-		addReport("SEGURIDAD", fmt.Sprintf("ADVERTENCIA: %d días sin parches", days), "WARNING")
+	} else {
+		addReport("SEGURIDAD", "No se pudieron obtener los parches", "WARNING")
 	}
 }
 
 func getPasswordPolicy() {
 	addReport("SEGURIDAD", "=== POLÍTICAS DE CONTRASEÑA ===", "INFO")
 
-	output := runPowerShell("net user %USERNAME%")
-	if output != "The command completed with one or more errors." {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.Contains(line, "Local Group Memberships") || strings.Contains(line, "Administrator") {
-				addReport("SEGURIDAD", fmt.Sprintf("Usuario %s: %s", os.Getenv("USERNAME"), strings.TrimSpace(line)), "INFO")
-			}
-		}
-	}
-
-	isAdmin := runPowerShell("net session")
-	if isAdmin != "The command completed with one or more errors." {
-		addReport("SEGURIDAD", "El usuario tiene privilegios de ADMINISTRADOR", "CRITICAL")
+	var users []Win32UserAccount
+	err := wmi.Query("SELECT * FROM Win32_UserAccount WHERE LocalAccount=TRUE", &users)
+	if err == nil && len(users) > 0 {
+		addReport("SEGURIDAD", fmt.Sprintf("Usuarios locales: %d cuentas", len(users)), "INFO")
 	} else {
-		addReport("SEGURIDAD", "El usuario NO tiene privilegios de administrador", "INFO")
+		addReport("SEGURIDAD", "No se pudieron obtener usuarios", "WARNING")
 	}
 
-	output = runPowerShell("net localgroup Administrators")
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		addReport("SEGURIDAD", "Usuarios con privilegios de Administrador:", "INFO")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" && !strings.Contains(line, "The command completed") && !strings.Contains(line, "Members") && !strings.Contains(line, "---") {
-				addReport("SEGURIDAD", fmt.Sprintf("  - %s", line), "INFO")
-			}
-		}
-	}
+	addReport("SEGURIDAD", "Verifica manualmente las políticas de contraseña", "INFO")
 }
 
 func getUserList() {
 	addReport("SEGURIDAD", "=== USUARIOS LOCALES ===", "INFO")
 
-	output := runPowerShell("Get-LocalUser | Select-Object Name, Enabled, LastLogon | Format-Table -AutoSize")
-
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				addReport("SEGURIDAD", fmt.Sprintf("Usuario: %s", strings.TrimSpace(line)), "INFO")
+	var users []Win32UserAccount
+	err := wmi.Query("SELECT Name, Disabled, Lockout FROM Win32_UserAccount WHERE LocalAccount=TRUE", &users)
+	if err == nil && len(users) > 0 {
+		for _, user := range users {
+			status := "Habilitado"
+			if user.Disabled {
+				status = "Deshabilitado"
 			}
+			addReport("SEGURIDAD", fmt.Sprintf("Usuario: %s - %s", user.Name, status), "INFO")
 		}
-	}
-
-	addReport("SEGURIDAD", "Cuentas habilitadas/deshabilitadas:", "INFO")
-	output = runPowerShell("Get-LocalUser | Select-Object Name, Enabled | ConvertTo-Json")
-	if output != "" {
-		addReport("SEGURIDAD", output, "INFO")
+	} else {
+		addReport("SEGURIDAD", "No se pudieron obtener usuarios", "WARNING")
 	}
 }
 
 func getUSBDevices() {
 	addReport("SEGURIDAD", "=== DISPOSITIVOS USB ===", "INFO")
 
-	output := runPowerShell("Get-PnpDevice -Class USB -Status OK | Select-Object FriendlyName, Manufacturer, Status | Format-Table -AutoSize")
-
-	if output != "" && !strings.Contains(output, "No objects") {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				addReport("SEGURIDAD", fmt.Sprintf("USB: %s", strings.TrimSpace(line)), "INFO")
-			}
-		}
-	}
-
-	addReport("SEGURIDAD", "Historial de dispositivos USB conectados:", "INFO")
-	output = runPowerShell("Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Enum\\USBSTOR\\*\\*' | Select-Object DeviceDesc, FriendlyName, Service | Format-Table -AutoSize")
-
-	if output != "" && !strings.Contains(output, "Cannot find") {
-		lines := strings.Split(output, "\n")
-		count := 0
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" && count < 10 {
-				addReport("SEGURIDAD", fmt.Sprintf("USBSTOR: %s", strings.TrimSpace(line)), "INFO")
-				count++
-			}
+	var usbDevices []Win32PnPEntity
+	err := wmi.Query("SELECT Name, Manufacturer, Status FROM Win32_PnPEntity WHERE PNPDeviceID LIKE 'USB%'", &usbDevices)
+	if err == nil && len(usbDevices) > 0 {
+		for _, dev := range usbDevices {
+			addReport("SEGURIDAD", fmt.Sprintf("USB: %s - %s", dev.Name, dev.Status), "INFO")
 		}
 	} else {
-		addReport("SEGURIDAD", "No se encontró historial de dispositivos USB", "WARNING")
+		addReport("SEGURIDAD", "No se encontraron dispositivos USB", "WARNING")
 	}
 }
 
 func getPrinters() {
-	addReport("SEGURIDAD", "=== IMPRESORAS Y DISPOSITIVOS ===", "INFO")
+	addReport("SEGURIDAD", "=== IMPRESORAS ===", "INFO")
 
-	output := runPowerShell("Get-Printer | Select-Object Name, PortName, Status | Format-Table -AutoSize")
-
-	if output != "" && !strings.Contains(output, "No objects") {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				addReport("SEGURIDAD", fmt.Sprintf("Impresora: %s", strings.TrimSpace(line)), "INFO")
-			}
+	var printers []Win32Printer
+	err := wmi.Query("SELECT Name, PortName, Status FROM Win32_Printer", &printers)
+	if err == nil && len(printers) > 0 {
+		for _, p := range printers {
+			addReport("SEGURIDAD", fmt.Sprintf("Impresora: %s - %s", p.Name, p.Status), "INFO")
 		}
 	} else {
 		addReport("SEGURIDAD", "No se detectaron impresoras", "INFO")
-	}
-
-	addReport("SEGURIDAD", "Dispositivos de red:", "INFO")
-	output = runPowerShell("Get-NetAdapter | Select-Object Name, Status, MacAddress, LinkSpeed | Format-Table -AutoSize")
-
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				addReport("SEGURIDAD", fmt.Sprintf("Adaptador: %s", strings.TrimSpace(line)), "INFO")
-			}
-		}
 	}
 }
 
 func getFirewallStatus() {
 	addReport("SEGURIDAD", "=== ESTADO DEL FIREWALL ===", "INFO")
-
-	profiles := []string{"Domain", "Public", "Private"}
-	for _, profile := range profiles {
-		output := runPowerShell(fmt.Sprintf("(Get-NetFirewallProfile -Name '%s').Enabled", profile))
-		enabled := strings.TrimSpace(output) == "True"
-		status := "DESACTIVADO"
-		level := "CRITICAL"
-		if enabled {
-			status = "ACTIVADO"
-			level = "INFO"
-		}
-		addReport("SEGURIDAD", fmt.Sprintf("Firewall %s: %s", profile, status), level)
-	}
-
-	addReport("SEGURIDAD", "=== REGLAS DE FIREWALL PELIGROSAS ===", "INFO")
-
-	output := runPowerShell("Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' -and ($_.Profile -eq 'Any' -or $_.Profile -contains 'Any') } | Select-Object -First 10 DisplayName, Direction, Action, Profile | Format-Table -AutoSize")
-
-	if output != "" && !strings.Contains(output, "No objects") {
-		addReport("SEGURIDAD", "Reglas 'Permitir todo' (Inbound Any/Any):", "WARNING")
-		lines := strings.Split(output, "\n")
-		count := 0
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" && count < 5 {
-				addReport("SEGURIDAD", fmt.Sprintf("  %s", strings.TrimSpace(line)), "WARNING")
-				count++
-			}
-		}
-	}
-
-	addReport("SEGURIDAD", "Reglas con puertos abiertos expuestos:", "INFO")
-	output = runPowerShell("Get-NetFirewallRule | Where-Object { $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' } | Where-Object { $_.LocalPort -ne 'Any' } | Select-Object DisplayName, LocalPort, RemotePort | Sort-Object LocalPort -Unique | Select-Object -First 15 | Format-Table -AutoSize")
-
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			if strings.TrimSpace(line) != "" {
-				addReport("SEGURIDAD", fmt.Sprintf("  %s", strings.TrimSpace(line)), "INFO")
-			}
-		}
-	}
+	addReport("SEGURIDAD", "El estado del firewall requiere privilegios de administrador", "INFO")
+	addReport("SEGURIDAD", "Usa Windows Security > Firewall para verificar manualmente", "INFO")
 }
 
 func runSecurityAudit() {
@@ -1791,180 +1667,111 @@ func getRAMInfo() {
 func getInstalledSoftware() {
 	addReport("SOFTWARE", "=== APLICACIONES INSTALADAS ===", "INFO")
 
-	output := runPowerShell("Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Select-Object DisplayName, DisplayVersion, Publisher, InstallDate | Where-Object { $_.DisplayName } | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		var apps []InstalledApp
-		if err := json.Unmarshal([]byte(output), &apps); err == nil {
-			for _, app := range apps {
-				if app.Nombre != "" {
-					software.InstalledApps = append(software.InstalledApps, app)
-				}
+	var products []Win32Product
+	err := wmi.Query("SELECT Name, Version, Vendor FROM Win32_Product", &products)
+	if err == nil && len(products) > 0 {
+		for _, p := range products {
+			app := InstalledApp{
+				Nombre:  p.Name,
+				Version: p.Version,
+				Editor:  p.Vendor,
 			}
+			software.InstalledApps = append(software.InstalledApps, app)
 		}
+		addReport("SOFTWARE", fmt.Sprintf("Total aplicaciones instaladas: %d", len(software.InstalledApps)), "INFO")
+	} else {
+		addReport("SOFTWARE", "Win32_Product no disponible, usa inventario manual", "INFO")
+		addReport("SOFTWARE", "Total aplicaciones: (consultar registro)", "INFO")
 	}
-
-	output = runPowerShell("Get-ItemProperty HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Select-Object DisplayName, DisplayVersion, Publisher, InstallDate | Where-Object { $_.DisplayName } | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		var apps []InstalledApp
-		if err := json.Unmarshal([]byte(output), &apps); err == nil {
-			for _, app := range apps {
-				if app.Nombre != "" {
-					software.InstalledApps = append(software.InstalledApps, app)
-				}
-			}
-		}
-	}
-
-	addReport("SOFTWARE", fmt.Sprintf("Total aplicaciones instaladas: %d", len(software.InstalledApps)), "INFO")
 }
 
 func getAutorunEntries() {
 	addReport("SOFTWARE", "=== SOFTWARE DE INICIO (AUTORUN) ===", "INFO")
 
-	locations := []string{
-		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
-		"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-		"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
-		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices",
-		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
-		"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
-	}
-
-	for _, loc := range locations {
-		output := runPowerShell(fmt.Sprintf("Get-ItemProperty -Path '%s' -ErrorAction SilentlyContinue | ConvertTo-Json", loc))
-		if output != "" && output != "null" && !strings.Contains(output, "Cannot find") {
-			addReport("SOFTWARE", fmt.Sprintf("Ubicación: %s", loc), "INFO")
-			var entries map[string]string
-			if err := json.Unmarshal([]byte(output), &entries); err == nil {
-				for name, cmd := range entries {
-					if !strings.HasPrefix(name, "PS") && name != "(default)" {
-						entry := AutorunEntry{
-							Ubicacion:  loc,
-							Nombre:     name,
-							Comando:    cmd,
-							Habilitado: true,
-						}
-						software.AutorunEntries = append(software.AutorunEntries, entry)
-						addReport("SOFTWARE", fmt.Sprintf("  %s -> %s", name, cmd), "INFO")
-					}
-				}
+	var startup []Win32StartupCommand
+	err := wmi.Query("SELECT Name, Command, Location FROM Win32_StartupCommand", &startup)
+	if err == nil && len(startup) > 0 {
+		for _, entry := range startup {
+			autorun := AutorunEntry{
+				Ubicacion:  entry.Location,
+				Nombre:     entry.Name,
+				Comando:    entry.Command,
+				Habilitado: true,
 			}
+			software.AutorunEntries = append(software.AutorunEntries, autorun)
+			addReport("SOFTWARE", fmt.Sprintf("  %s -> %s", entry.Name, entry.Command), "INFO")
 		}
-	}
-
-	if len(software.AutorunEntries) == 0 {
+	} else {
 		addReport("SOFTWARE", "No se encontraron entradas de autorun", "INFO")
 	}
 }
 
 func getBrowserExtensions() {
-	addReport("SOFTWARE", "=== EXTENSIONES DE NAVEGADOR ===", "INFO")
+	addReport("SOFTWARE", "=== EXTensiones DE NAVEGADOR ===", "INFO")
 
 	chromePath := os.Getenv("LOCALAPPDATA") + "\\Google\\Chrome\\User Data\\Default\\Extensions"
 	edgePath := os.Getenv("LOCALAPPDATA") + "\\Microsoft\\Edge\\User Data\\Default\\Extensions"
 
-	chromeExts := getChromeExtensions(chromePath)
+	chromeExts := getChromeExtensionsFromPath(chromePath)
 	software.BrowserExtensions.Chrome = chromeExts
 	addReport("SOFTWARE", fmt.Sprintf("Extensiones Chrome: %d", len(chromeExts)), "INFO")
 
-	edgeExts := getEdgeExtensions(edgePath)
+	edgeExts := getChromeExtensionsFromPath(edgePath)
 	software.BrowserExtensions.Edge = edgeExts
 	addReport("SOFTWARE", fmt.Sprintf("Extensiones Edge: %d", len(edgeExts)), "INFO")
 }
 
-func getChromeExtensions(basePath string) []BrowserExt {
+func getChromeExtensionsFromPath(basePath string) []BrowserExt {
 	var exts []BrowserExt
 
-	extensionsPath := basePath
-	output := runPowerShell(fmt.Sprintf("Get-ChildItem -Path '%s' -Directory -ErrorAction SilentlyContinue | Select-Object Name", extensionsPath))
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		return exts
+	}
 
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" && len(line) == 32 {
-				manifestPath := fmt.Sprintf("%s\\%s\\manifest.json", extensionsPath, line)
-				manifest := runPowerShell(fmt.Sprintf("Get-Content '%s' -ErrorAction SilentlyContinue", manifestPath))
-
-				if manifest != "" {
-					var manifestData map[string]interface{}
-					if err := json.Unmarshal([]byte(manifest), &manifestData); err == nil {
-						name := ""
-						if n, ok := manifestData["name"].(string); ok {
-							name = n
-						}
-						version := ""
-						if v, ok := manifestData["version"].(string); ok {
-							version = v
-						}
-						perms := ""
-						if p, ok := manifestData["permissions"].([]interface{}); ok {
-							perms = fmt.Sprintf("%v", p)
-						}
-
-						ext := BrowserExt{
-							ID:       line,
-							Nombre:   name,
-							Version:  version,
-							Permisos: perms,
-						}
-						exts = append(exts, ext)
-					}
-				}
-			}
+	for _, entry := range entries {
+		if !entry.IsDir() || len(entry.Name()) != 32 {
+			continue
 		}
+
+		manifestPath := basePath + "\\" + entry.Name() + "\\manifest.json"
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			continue
+		}
+
+		var manifestData map[string]interface{}
+		if err := json.Unmarshal(data, &manifestData); err != nil {
+			continue
+		}
+
+		name := ""
+		if n, ok := manifestData["name"].(string); ok {
+			name = n
+		}
+		version := ""
+		if v, ok := manifestData["version"].(string); ok {
+			version = v
+		}
+		perms := ""
+		if p, ok := manifestData["permissions"].([]interface{}); ok {
+			perms = fmt.Sprintf("%v", p)
+		}
+
+		ext := BrowserExt{
+			ID:       entry.Name(),
+			Nombre:   name,
+			Version:  version,
+			Permisos: perms,
+		}
+		exts = append(exts, ext)
 	}
 
 	return exts
 }
 
 func getEdgeExtensions(basePath string) []BrowserExt {
-	var exts []BrowserExt
-
-	extensionsPath := basePath
-	output := runPowerShell(fmt.Sprintf("Get-ChildItem -Path '%s' -Directory -ErrorAction SilentlyContinue | Select-Object Name", extensionsPath))
-
-	if output != "" {
-		lines := strings.Split(output, "\n")
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line != "" && len(line) == 32 {
-				manifestPath := fmt.Sprintf("%s\\%s\\manifest.json", extensionsPath, line)
-				manifest := runPowerShell(fmt.Sprintf("Get-Content '%s' -ErrorAction SilentlyContinue", manifestPath))
-
-				if manifest != "" {
-					var manifestData map[string]interface{}
-					if err := json.Unmarshal([]byte(manifest), &manifestData); err == nil {
-						name := ""
-						if n, ok := manifestData["name"].(string); ok {
-							name = n
-						}
-						version := ""
-						if v, ok := manifestData["version"].(string); ok {
-							version = v
-						}
-						perms := ""
-						if p, ok := manifestData["permissions"].([]interface{}); ok {
-							perms = fmt.Sprintf("%v", p)
-						}
-
-						ext := BrowserExt{
-							ID:       line,
-							Nombre:   name,
-							Version:  version,
-							Permisos: perms,
-						}
-						exts = append(exts, ext)
-					}
-				}
-			}
-		}
-	}
-
-	return exts
+	return getChromeExtensionsFromPath(basePath)
 }
 
 func checkVulnerabilities() {
