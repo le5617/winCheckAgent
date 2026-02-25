@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/StackExchange/wmi"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/disk"
 	"github.com/shirou/gopsutil/v3/host"
@@ -266,6 +267,228 @@ func runPowerShell(command string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
+}
+
+type Win32ComputerSystem struct {
+	Name            string
+	Domain          string
+	DomainRole      uint16
+	Manufacturer    string
+	Model           string
+	SystemSKUNumber string
+}
+
+type Win32OperatingSystem struct {
+	Caption        string
+	Version        string
+	BuildNumber    string
+	OSArchitecture string
+}
+
+type Win32BIOS struct {
+	Manufacturer string
+	Name         string
+	Version      string
+	SerialNumber string
+	ReleaseDate  *time.Time
+}
+
+type Win32Processor struct {
+	Name                      string
+	Manufacturer              string
+	NumberOfCores             uint32
+	NumberOfLogicalProcessors uint32
+	MaxClockSpeed             uint32
+	ProcessorId               string
+}
+
+type Win32PhysicalMemory struct {
+	Capacity      uint64
+	Speed         uint16
+	MemoryType    uint16
+	FormFactor    uint16
+	BankLabel     string
+	DeviceLocator string
+}
+
+type Win32Battery struct {
+	Name                     string
+	EstimatedChargeRemaining uint32
+	EstimatedRunTime         uint32
+	BatteryStatus            uint32
+	DesignCapacity           uint32
+	FullChargeCapacity       uint32
+}
+
+type Win32DiskDrive struct {
+	Model         string
+	SerialNumber  string
+	Size          uint64
+	MediaType     string
+	Status        string
+	InterfaceType string
+}
+
+type Win32LogicalDisk struct {
+	DeviceID   string
+	VolumeName string
+	FileSystem string
+	Size       uint64
+	FreeSpace  uint64
+}
+
+func queryWMI(class string, dst interface{}) bool {
+	err := wmi.Query(class, dst)
+	return err == nil
+}
+
+func getWMIComputerInfo() {
+	var dst []Win32ComputerSystem
+	err := wmi.Query("SELECT * FROM Win32_ComputerSystem", &dst)
+	if err == nil && len(dst) > 0 {
+		cs := dst[0]
+		equipo.NombreEquipo = cs.Name
+		equipo.Dominio = cs.Domain
+		equipo.Fabricante = cs.Manufacturer
+		equipo.Modelo = cs.Model
+		equipo.Producto = cs.SystemSKUNumber
+
+		switch cs.DomainRole {
+		case 0:
+			equipo.Rol = "Estación de trabajo"
+		case 1:
+			equipo.Rol = "Estación de trabajo (miembro de dominio)"
+		case 2:
+			equipo.Rol = "Servidor miembro"
+		case 3:
+			equipo.Rol = "Servidor miembro (miembro de dominio)"
+		case 4:
+			equipo.Rol = "Controlador de dominio"
+		case 5:
+			equipo.Rol = "Controlador de dominio (primario)"
+		}
+	}
+}
+
+func getWMIOSInfo() {
+	var dst []Win32OperatingSystem
+	err := wmi.Query("SELECT * FROM Win32_OperatingSystem", &dst)
+	if err == nil && len(dst) > 0 {
+		os := dst[0]
+		equipo.SistemaOperativo = os.Caption
+		equipo.Version = os.Version
+	}
+}
+
+func getWMIBIOSInfo() {
+	var dst []Win32BIOS
+	err := wmi.Query("SELECT * FROM Win32_BIOS", &dst)
+	if err == nil && len(dst) > 0 {
+		bios := dst[0]
+		hardware.BIOS.Fabricante = bios.Manufacturer
+		hardware.BIOS.Version = bios.Version
+		hardware.BIOS.NumeroSerie = bios.SerialNumber
+		if bios.ReleaseDate != nil {
+			hardware.BIOS.Fecha = bios.ReleaseDate.Format("2006-01-02")
+		}
+		if equipo.NumeroSerie == "" {
+			equipo.NumeroSerie = bios.SerialNumber
+		}
+	}
+}
+
+func getWMIProcessorInfo() {
+	var dst []Win32Processor
+	err := wmi.Query("SELECT * FROM Win32_Processor", &dst)
+	if err == nil && len(dst) > 0 {
+		p := dst[0]
+		hardware.Procesador.Nombre = strings.TrimSpace(p.Name)
+		hardware.Procesador.Fabricante = p.Manufacturer
+		hardware.Procesador.Nucleos = int(p.NumberOfCores)
+		hardware.Procesador.Threads = int(p.NumberOfLogicalProcessors)
+		hardware.Procesador.FrecuenciaMax = int(p.MaxClockSpeed)
+		hardware.Procesador.Identificador = p.ProcessorId
+	}
+}
+
+func getWMIPhysicalMemory() {
+	var dst []Win32PhysicalMemory
+	err := wmi.Query("SELECT * FROM Win32_PhysicalMemory", &dst)
+	if err == nil {
+		var totalRAM uint64
+		var velocidad uint16
+		slots := 0
+
+		for _, m := range dst {
+			totalRAM += m.Capacity
+			velocidad = m.Speed
+			slots++
+		}
+
+		hardware.RAM.TotalGB = float64(totalRAM) / (1024 * 1024 * 1024)
+		hardware.RAM.SlotsUsados = slots
+		hardware.RAM.Velocidad = int(velocidad)
+	}
+}
+
+func getWMIBatteryInfo() {
+	var dst []Win32Battery
+	err := wmi.Query("SELECT * FROM Win32_Battery", &dst)
+	if err == nil && len(dst) > 0 {
+		b := dst[0]
+		hardware.Bateria.Nombre = b.Name
+		hardware.Bateria.CargaPorcent = float64(b.EstimatedChargeRemaining)
+		hardware.Bateria.TiempoRestante = int(b.EstimatedRunTime)
+
+		switch b.BatteryStatus {
+		case 1:
+			hardware.Bateria.Estado = "Desconectado"
+		case 2:
+			hardware.Bateria.Estado = "Conectado - Alta carga"
+		case 3:
+			hardware.Bateria.Estado = "Conectado - Baja carga"
+		case 4:
+			hardware.Bateria.Estado = "Conectado - Cargando"
+		case 5:
+			hardware.Bateria.Estado = "Conectado - Cargado"
+		case 6:
+			hardware.Bateria.Estado = "Conectado - Carga baja"
+		case 7:
+			hardware.Bateria.Estado = "Conectado - Cargando"
+		case 8:
+			hardware.Bateria.Estado = "Conectado - Cargando"
+		case 9:
+			hardware.Bateria.Estado = "Desconocido"
+		case 10:
+			hardware.Bateria.Estado = "Desconectado"
+		case 11:
+			hardware.Bateria.Estado = "Cargando"
+		default:
+			hardware.Bateria.Estado = "Desconocido"
+		}
+
+		hardware.Bateria.CapacidadDiseno = int64(b.DesignCapacity)
+		hardware.Bateria.CapacidadActual = int64(b.FullChargeCapacity)
+
+		if b.DesignCapacity > 0 && b.FullChargeCapacity > 0 {
+			hardware.Bateria.SaludPorcent = float64(b.FullChargeCapacity) / float64(b.DesignCapacity) * 100
+		}
+	}
+}
+
+func getWMIDiskDrive() {
+	var dst []Win32DiskDrive
+	err := wmi.Query("SELECT * FROM Win32_DiskDrive", &dst)
+	if err == nil {
+		for _, d := range dst {
+			diskInfo := DiskInfo{
+				Modelo:      d.Model,
+				NumeroSerie: d.SerialNumber,
+				Estado:      d.Status,
+			}
+			hardware.Discos = append(hardware.Discos, diskInfo)
+		}
+	}
 }
 
 func getSystemInfo() {
@@ -1211,6 +1434,13 @@ func runSecurityAudit() {
 }
 
 func collectHardwareInfo() {
+	getWMIComputerInfo()
+	getWMIOSInfo()
+	getWMIBIOSInfo()
+	getWMIProcessorInfo()
+	getWMIPhysicalMemory()
+	getWMIBatteryInfo()
+	getWMIDiskDrive()
 	getDiskHealth()
 	getBatteryHealth()
 	getBIOSInfo()
