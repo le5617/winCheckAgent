@@ -208,6 +208,33 @@ El reporte genera un JSON estructurado:
 - **WMI nativo**: Librería `github.com/StackExchange/wmi` para acceso directo
 - **gopsutil**: Acceso multiplataforma a métricas del sistema
 
+## GitHub Actions
+
+Este proyecto incluye workflows de GitHub Actions para compilación y release automática:
+
+### Compilación automática
+
+1. Crea un tag de versión:
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+
+2. El workflow `build.yml` compilará automáticamente y creará una release
+
+### Firma digital (opcional)
+
+Para firmar el ejecutable:
+
+1. Crea un certificado de firma de código (de una CA o autofirmado)
+2. Exporta el certificado a formato PFX
+3. Codifica el PFX en Base64:
+   ```powershell
+   [System.Convert]::ToBase64String((Get-Content -Path certificado.pfx -Raw)) | Set-Clipboard
+   ```
+4. Ve a Actions > Sign Executable > Run workflow
+5. Ingresa el PFX codificado y la contraseña
+
 ## Licencia
 
 MIT License - ver [LICENSE](LICENSE) para más detalles.

@@ -1,0 +1,60 @@
+name: Sign Executable
+
+on:
+  workflow_dispatch:
+    inputs:
+      pfx_base64:
+        description: 'Certificate PFX encoded in Base64'
+        required: false
+        type: string
+      pfx_password:
+        description: 'Certificate password'
+        required: false
+        type: string
+
+jobs:
+  sign:
+    runs-on: windows-latest
+    if: github.event.inputs.pfx_base64 != ''
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build executable
+        run: |
+          go build -ldflags "-s -w" -o ciberox-endpoint.exe main.go
+
+      - name: Decode certificate
+        run: |
+          [System.Convert]::FromBase64String($env:PFX_BASE64) | Set-Content -Path certificate.pfx -Encoding Byte
+        env:
+          PFX_BASE64: ${{ github.event.inputs.pfx_base64 }}
+
+      - name: Sign executable
+        run: |
+          $password = ConvertTo-SecureString -String $env:PFX_PASSWORD -Force -AsPlainText
+          Import-PfxCertificate -FilePath certificate.pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          
+          # Get the certificate thumbprint
+          $cert = Get-PfxCertificate -FilePath certificate.pfx -Password $password
+          $thumbprint = $cert.Thumbprint
+          
+          # Sign using signtool
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /f certificate.pfx /p $env:PFX_PASSWORD /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 $thumbprint ciberox-endpoint.exe
+          
+          # Verify signature
+          & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" verify /pa /v ciberox-endpoint.exe
+        env:
+          PFX_PASSWORD: ${{ github.event.inputs.pfx_password }}
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ciberox-endpoint-signed
+          path: ciberox-endpoint.exe
