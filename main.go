@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -19,15 +18,101 @@ import (
 
 type ReportEntry struct {
 	Timestamp string `json:"timestamp"`
-	Category  string `json:"categoria"`
 	Level     string `json:"nivel"`
 	Message   string `json:"mensaje"`
 }
 
+type ComputerInfo struct {
+	NombreEquipo     string `json:"nombre_equipo,omitempty"`
+	Dominio          string `json:"dominio,omitempty"`
+	Rol              string `json:"rol,omitempty"`
+	SistemaOperativo string `json:"sistema_operativo,omitempty"`
+	Version          string `json:"version,omitempty"`
+	Fabricante       string `json:"fabricante,omitempty"`
+	Modelo           string `json:"modelo,omitempty"`
+	NumeroSerie      string `json:"numero_serie,omitempty"`
+}
+
+type SystemInfo struct {
+	Plataforma  string  `json:"plataforma"`
+	Kernel      string  `json:"kernel"`
+	Uptime      string  `json:"uptime"`
+	RAMTotalGB  float64 `json:"ram_total_gb"`
+	CPUPorcent  float64 `json:"cpu_porcentaje"`
+	MemPorcent  float64 `json:"memoria_porcentaje"`
+	DiskPorcent float64 `json:"disco_porcentaje"`
+}
+
+type NetworkInfo struct {
+	Interfaces []NetworkInterface `json:"interfaces"`
+}
+
+type NetworkInterface struct {
+	Name        string   `json:"nombre"`
+	IPAddresses []string `json:"direcciones_ip"`
+	MAC         string   `json:"mac"`
+	Status      string   `json:"estado"`
+}
+
+type SecurityInfo struct {
+	ListeningPorts  []PortInfo      `json:"puertos_escucha"`
+	SecurityPatches []SecurityPatch `json:"parches_seguridad"`
+	Users           []UserInfo      `json:"usuarios_locales"`
+	Administrators  []string        `json:"administradores"`
+	USBDevices      []string        `json:"dispositivos_usb"`
+	Printers        []string        `json:"impresoras"`
+	FirewallStatus  FirewallStatus  `json:"firewall"`
+	IsAdmin         bool            `json:"es_administrador"`
+	DiasSinParchar  int             `json:"dias_sin_parche"`
+}
+
+type PortInfo struct {
+	Port       int    `json:"puerto"`
+	Service    string `json:"servicio"`
+	Process    string `json:"proceso"`
+	Sospechoso bool   `json:"sospechoso"`
+}
+
+type SecurityPatch struct {
+	HotFixID    string `json:"id"`
+	Descripcion string `json:"descripcion"`
+	Instalado   string `json:"instalado"`
+}
+
+type UserInfo struct {
+	Nombre      string `json:"nombre"`
+	Habilitado  bool   `json:"habilitado"`
+	UltimoLogin string `json:"ultimo_login"`
+}
+
+type FirewallStatus struct {
+	Domain  bool `json:"domain"`
+	Public  bool `json:"public"`
+	Private bool `json:"private"`
+}
+
+type ServiceInfo struct {
+	Name      string `json:"nombre"`
+	Status    string `json:"estado"`
+	StartType string `json:"tipo_inicio"`
+}
+
+type ProcessInfo struct {
+	Name       string  `json:"nombre"`
+	PID        int32   `json:"pid"`
+	CPUPercent float64 `json:"cpu_porcentaje"`
+	MemPercent float64 `json:"mem_porcentaje"`
+}
+
 type DiagnosticReport struct {
-	Fecha   string        `json:"fecha"`
-	Report  []ReportEntry `json:"reporte"`
-	Alertas []ReportEntry `json:"alertas"`
+	Fecha     string        `json:"fecha"`
+	Equipo    ComputerInfo  `json:"equipo"`
+	Sistema   SystemInfo    `json:"sistema"`
+	Red       NetworkInfo   `json:"red"`
+	Seguridad SecurityInfo  `json:"seguridad"`
+	Servicios []ServiceInfo `json:"servicios"`
+	Procesos  []ProcessInfo `json:"procesos"`
+	Alertas   []ReportEntry `json:"alertas"`
 }
 
 type AlertasActivas struct {
@@ -53,11 +138,16 @@ type Historial struct {
 
 var report []ReportEntry
 var alertas []ReportEntry
+var equipo ComputerInfo
+var sistema SystemInfo
+var red NetworkInfo
+var seguridad SecurityInfo
+var servicios []ServiceInfo
+var procesos []ProcessInfo
 
 func addReport(category, message, level string) {
 	entry := ReportEntry{
 		Timestamp: time.Now().Format(time.RFC3339),
-		Category:  category,
 		Level:     level,
 		Message:   message,
 	}
@@ -78,20 +168,27 @@ func runPowerShell(command string) string {
 }
 
 func getSystemInfo() {
-	addReport("SISTEMA", fmt.Sprintf("Sistema: %s %s", runtime.GOOS, runtime.GOARCH), "INFO")
-
 	hostInfo, err := host.Info()
 	if err == nil {
+		equipo.NombreEquipo = hostInfo.Hostname
+		equipo.SistemaOperativo = fmt.Sprintf("%s %s", hostInfo.Platform, hostInfo.PlatformVersion)
+		equipo.Version = hostInfo.KernelVersion
+
+		sistema.Plataforma = hostInfo.Platform
+		sistema.Kernel = hostInfo.KernelVersion
+		uptime := time.Duration(hostInfo.Uptime) * time.Second
+		sistema.Uptime = uptime.String()
+
 		addReport("SISTEMA", fmt.Sprintf("Hostname: %s", hostInfo.Hostname), "INFO")
 		addReport("SISTEMA", fmt.Sprintf("Plataforma: %s %s", hostInfo.Platform, hostInfo.PlatformVersion), "INFO")
 		addReport("SISTEMA", fmt.Sprintf("Kernel: %s", hostInfo.KernelVersion), "INFO")
-
-		uptime := time.Duration(hostInfo.Uptime) * time.Second
 		addReport("SISTEMA", fmt.Sprintf("Tiempo activo: %s", uptime.String()), "INFO")
 	}
 
 	vm, _ := mem.VirtualMemory()
-	addReport("SISTEMA", fmt.Sprintf("RAM total: %.1f GB", float64(vm.Total)/(1024*1024*1024)), "INFO")
+	ramGB := float64(vm.Total) / (1024 * 1024 * 1024)
+	sistema.RAMTotalGB = ramGB
+	addReport("SISTEMA", fmt.Sprintf("RAM total: %.1f GB", ramGB), "INFO")
 }
 
 func checkCPU() {
@@ -101,6 +198,7 @@ func checkCPU() {
 		avgPercent = cpuPercent[0]
 	}
 
+	sistema.CPUPorcent = avgPercent
 	level := "INFO"
 	if avgPercent > 80 {
 		level = "WARNING"
@@ -129,6 +227,8 @@ func checkCPU() {
 func checkMemory() {
 	vm, _ := mem.VirtualMemory()
 
+	sistema.MemPorcent = vm.UsedPercent
+
 	level := "INFO"
 	if vm.UsedPercent > 80 {
 		level = "WARNING"
@@ -155,6 +255,10 @@ func checkDisk() {
 	for _, p := range partitions {
 		usage, err := disk.Usage(p.Mountpoint)
 		if err == nil {
+			if p.Mountpoint == "C:" || p.Mountpoint == "C:\\" {
+				sistema.DiskPorcent = usage.UsedPercent
+			}
+
 			level := "INFO"
 			if usage.UsedPercent > 80 {
 				level = "WARNING"
@@ -489,9 +593,14 @@ func generateRecommendations() {
 
 func saveReport(filename string) {
 	dr := DiagnosticReport{
-		Fecha:   time.Now().Format("2006-01-02 15:04:05"),
-		Report:  report,
-		Alertas: alertas,
+		Fecha:     time.Now().Format("2006-01-02 15:04:05"),
+		Equipo:    equipo,
+		Sistema:   sistema,
+		Red:       red,
+		Seguridad: seguridad,
+		Servicios: servicios,
+		Procesos:  procesos,
+		Alertas:   alertas,
 	}
 
 	data, _ := json.MarshalIndent(dr, "", "  ")
@@ -558,32 +667,6 @@ func saveHistory() {
 }
 
 func printReport() {
-	fmt.Println("\n" + strings.Repeat("=", 60))
-	fmt.Println("  REPORTE DE DIAGNOSTICO")
-	fmt.Println(strings.Repeat("=", 60) + "\n")
-
-	categorias := make(map[string][]ReportEntry)
-	for _, entry := range report {
-		categorias[entry.Category] = append(categorias[entry.Category], entry)
-	}
-
-	for cat, items := range categorias {
-		fmt.Printf("\n--- %s ---\n", cat)
-		for _, item := range items {
-			emoji := map[string]string{
-				"INFO":     "[+]",
-				"WARNING":  "[!]",
-				"CRITICAL": "[X]",
-			}[item.Level]
-
-			if emoji == "" {
-				emoji = "[*]"
-			}
-
-			fmt.Printf("  %s %s\n", emoji, item.Message)
-		}
-	}
-
 	if len(alertas) > 0 {
 		criticas := 0
 		warnings := 0
@@ -680,15 +763,15 @@ func main() {
 }
 
 func getComputerInfo() {
-	addReport("EQUIPO", "=== INFORMACIÓN DEL EQUIPO ===", "INFO")
-
 	output := runPowerShell("(Get-CimInstance Win32_ComputerSystem).Name")
 	if output != "" {
+		equipo.NombreEquipo = output
 		addReport("EQUIPO", fmt.Sprintf("Nombre del equipo: %s", output), "INFO")
 	}
 
 	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Domain")
 	if output != "" {
+		equipo.Dominio = output
 		addReport("EQUIPO", fmt.Sprintf("Dominio/Grupo de trabajo: %s", output), "INFO")
 	}
 
@@ -710,22 +793,26 @@ func getComputerInfo() {
 			role = "Controlador de dominio (primario)"
 		}
 		if role != "" {
+			equipo.Rol = role
 			addReport("EQUIPO", fmt.Sprintf("Rol: %s", role), "INFO")
 		}
 	}
 
 	output = runPowerShell("(Get-CimInstance Win32_OperatingSystem).Caption")
 	if output != "" {
+		equipo.SistemaOperativo = output
 		addReport("EQUIPO", fmt.Sprintf("Sistema operativo: %s", output), "INFO")
 	}
 
 	output = runPowerShell("(Get-CimInstance Win32_OperatingSystem).Version")
 	if output != "" {
+		equipo.Version = output
 		addReport("EQUIPO", fmt.Sprintf("Versión: %s", output), "INFO")
 	}
 
 	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Manufacturer")
 	if output != "" {
+		equipo.Fabricante = output
 		addReport("EQUIPO", fmt.Sprintf("Fabricante: %s", output), "INFO")
 	}
 
