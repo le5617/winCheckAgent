@@ -64,6 +64,7 @@ type SecurityInfo struct {
 	FirewallStatus  FirewallStatus  `json:"firewall"`
 	IsAdmin         bool            `json:"es_administrador"`
 	DiasSinParchar  int             `json:"dias_sin_parche"`
+	Software        SoftwareInfo    `json:"software"`
 }
 
 type PortInfo struct {
@@ -89,6 +90,48 @@ type FirewallStatus struct {
 	Domain  bool `json:"domain"`
 	Public  bool `json:"public"`
 	Private bool `json:"private"`
+}
+
+type SoftwareInfo struct {
+	InstalledApps     []InstalledApp  `json:"aplicaciones_instaladas"`
+	AutorunEntries    []AutorunEntry  `json:"autorun"`
+	BrowserExtensions BrowserExts     `json:"extensiones_navegador"`
+	Vulnerabilities   []Vulnerability `json:"vulnerabilidades"`
+}
+
+type InstalledApp struct {
+	Nombre    string `json:"nombre"`
+	Version   string `json:"version"`
+	Editor    string `json:"editor"`
+	FechaInst string `json:"fecha_instalacion"`
+}
+
+type AutorunEntry struct {
+	Ubicacion  string `json:"ubicacion"`
+	Nombre     string `json:"nombre"`
+	Comando    string `json:"comando"`
+	Habilitado bool   `json:"habilitado"`
+}
+
+type BrowserExts struct {
+	Chrome []BrowserExt `json:"chrome"`
+	Edge   []BrowserExt `json:"edge"`
+}
+
+type BrowserExt struct {
+	ID       string `json:"id"`
+	Nombre   string `json:"nombre"`
+	Editor   string `json:"editor"`
+	Version  string `json:"version"`
+	Permisos string `json:"permisos"`
+}
+
+type Vulnerability struct {
+	Software    string `json:"software"`
+	Version     string `json:"version"`
+	Severidad   string `json:"severidad"`
+	CVE         string `json:"cve"`
+	Descripcion string `json:"descripcion"`
 }
 
 type ServiceInfo struct {
@@ -144,6 +187,7 @@ var red NetworkInfo
 var seguridad SecurityInfo
 var servicios []ServiceInfo
 var procesos []ProcessInfo
+var software SoftwareInfo
 
 func addReport(category, message, level string) {
 	entry := ReportEntry{
@@ -1101,4 +1145,252 @@ func runSecurityAudit() {
 	getUSBDevices()
 	getPrinters()
 	getFirewallStatus()
+	getInstalledSoftware()
+	getAutorunEntries()
+	getBrowserExtensions()
+	checkVulnerabilities()
+}
+
+func getInstalledSoftware() {
+	addReport("SOFTWARE", "=== APLICACIONES INSTALADAS ===", "INFO")
+
+	output := runPowerShell("Get-ItemProperty HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Select-Object DisplayName, DisplayVersion, Publisher, InstallDate | Where-Object { $_.DisplayName } | ConvertTo-Json")
+
+	if output != "" && output != "null" {
+		var apps []InstalledApp
+		if err := json.Unmarshal([]byte(output), &apps); err == nil {
+			for _, app := range apps {
+				if app.Nombre != "" {
+					software.InstalledApps = append(software.InstalledApps, app)
+				}
+			}
+		}
+	}
+
+	output = runPowerShell("Get-ItemProperty HKLM:\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Select-Object DisplayName, DisplayVersion, Publisher, InstallDate | Where-Object { $_.DisplayName } | ConvertTo-Json")
+
+	if output != "" && output != "null" {
+		var apps []InstalledApp
+		if err := json.Unmarshal([]byte(output), &apps); err == nil {
+			for _, app := range apps {
+				if app.Nombre != "" {
+					software.InstalledApps = append(software.InstalledApps, app)
+				}
+			}
+		}
+	}
+
+	addReport("SOFTWARE", fmt.Sprintf("Total aplicaciones instaladas: %d", len(software.InstalledApps)), "INFO")
+}
+
+func getAutorunEntries() {
+	addReport("SOFTWARE", "=== SOFTWARE DE INICIO (AUTORUN) ===", "INFO")
+
+	locations := []string{
+		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+		"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+		"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce",
+		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\RunServices",
+		"HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+		"HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+	}
+
+	for _, loc := range locations {
+		output := runPowerShell(fmt.Sprintf("Get-ItemProperty -Path '%s' -ErrorAction SilentlyContinue | ConvertTo-Json", loc))
+		if output != "" && output != "null" && !strings.Contains(output, "Cannot find") {
+			addReport("SOFTWARE", fmt.Sprintf("Ubicación: %s", loc), "INFO")
+			var entries map[string]string
+			if err := json.Unmarshal([]byte(output), &entries); err == nil {
+				for name, cmd := range entries {
+					if !strings.HasPrefix(name, "PS") && name != "(default)" {
+						entry := AutorunEntry{
+							Ubicacion:  loc,
+							Nombre:     name,
+							Comando:    cmd,
+							Habilitado: true,
+						}
+						software.AutorunEntries = append(software.AutorunEntries, entry)
+						addReport("SOFTWARE", fmt.Sprintf("  %s -> %s", name, cmd), "INFO")
+					}
+				}
+			}
+		}
+	}
+
+	if len(software.AutorunEntries) == 0 {
+		addReport("SOFTWARE", "No se encontraron entradas de autorun", "INFO")
+	}
+}
+
+func getBrowserExtensions() {
+	addReport("SOFTWARE", "=== EXTENSIONES DE NAVEGADOR ===", "INFO")
+
+	chromePath := os.Getenv("LOCALAPPDATA") + "\\Google\\Chrome\\User Data\\Default\\Extensions"
+	edgePath := os.Getenv("LOCALAPPDATA") + "\\Microsoft\\Edge\\User Data\\Default\\Extensions"
+
+	chromeExts := getChromeExtensions(chromePath)
+	software.BrowserExtensions.Chrome = chromeExts
+	addReport("SOFTWARE", fmt.Sprintf("Extensiones Chrome: %d", len(chromeExts)), "INFO")
+
+	edgeExts := getEdgeExtensions(edgePath)
+	software.BrowserExtensions.Edge = edgeExts
+	addReport("SOFTWARE", fmt.Sprintf("Extensiones Edge: %d", len(edgeExts)), "INFO")
+}
+
+func getChromeExtensions(basePath string) []BrowserExt {
+	var exts []BrowserExt
+
+	extensionsPath := basePath
+	output := runPowerShell(fmt.Sprintf("Get-ChildItem -Path '%s' -Directory -ErrorAction SilentlyContinue | Select-Object Name", extensionsPath))
+
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && len(line) == 32 {
+				manifestPath := fmt.Sprintf("%s\\%s\\manifest.json", extensionsPath, line)
+				manifest := runPowerShell(fmt.Sprintf("Get-Content '%s' -ErrorAction SilentlyContinue", manifestPath))
+
+				if manifest != "" {
+					var manifestData map[string]interface{}
+					if err := json.Unmarshal([]byte(manifest), &manifestData); err == nil {
+						name := ""
+						if n, ok := manifestData["name"].(string); ok {
+							name = n
+						}
+						version := ""
+						if v, ok := manifestData["version"].(string); ok {
+							version = v
+						}
+						perms := ""
+						if p, ok := manifestData["permissions"].([]interface{}); ok {
+							perms = fmt.Sprintf("%v", p)
+						}
+
+						ext := BrowserExt{
+							ID:       line,
+							Nombre:   name,
+							Version:  version,
+							Permisos: perms,
+						}
+						exts = append(exts, ext)
+					}
+				}
+			}
+		}
+	}
+
+	return exts
+}
+
+func getEdgeExtensions(basePath string) []BrowserExt {
+	var exts []BrowserExt
+
+	extensionsPath := basePath
+	output := runPowerShell(fmt.Sprintf("Get-ChildItem -Path '%s' -Directory -ErrorAction SilentlyContinue | Select-Object Name", extensionsPath))
+
+	if output != "" {
+		lines := strings.Split(output, "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && len(line) == 32 {
+				manifestPath := fmt.Sprintf("%s\\%s\\manifest.json", extensionsPath, line)
+				manifest := runPowerShell(fmt.Sprintf("Get-Content '%s' -ErrorAction SilentlyContinue", manifestPath))
+
+				if manifest != "" {
+					var manifestData map[string]interface{}
+					if err := json.Unmarshal([]byte(manifest), &manifestData); err == nil {
+						name := ""
+						if n, ok := manifestData["name"].(string); ok {
+							name = n
+						}
+						version := ""
+						if v, ok := manifestData["version"].(string); ok {
+							version = v
+						}
+						perms := ""
+						if p, ok := manifestData["permissions"].([]interface{}); ok {
+							perms = fmt.Sprintf("%v", p)
+						}
+
+						ext := BrowserExt{
+							ID:       line,
+							Nombre:   name,
+							Version:  version,
+							Permisos: perms,
+						}
+						exts = append(exts, ext)
+					}
+				}
+			}
+		}
+	}
+
+	return exts
+}
+
+func checkVulnerabilities() {
+	addReport("SOFTWARE", "=== VERIFICACIÓN DE VULNERABILIDADES ===", "INFO")
+
+	vulnerableSoftware := map[string][][]string{
+		"Adobe": {
+			{"<= 23.001.20093", "CRITICAL", "APSB23-47", "Vulnerabilidad crítica en Adobe Acrobat"},
+			{"<= 15.001.20840", "CRITICAL", "APSB23-34", "Vulnerabilidad crítica en Adobe Reader"},
+		},
+		"Java": {
+			{"<= 8u371", "CRITICAL", "CVE-2023-21939", "Vulnerabilidad de seguridad en Oracle Java SE"},
+			{"<= 11.0.19", "CRITICAL", "CVE-2023-21938", "Vulnerabilidad en Java SE"},
+			{"<= 17.0.7", "CRITICAL", "CVE-2023-21930", "Vulnerabilidad en Java SE"},
+		},
+		"Google Chrome": {
+			{"<= 114.0.5735.110", "HIGH", "CVE-2023-3079", "Type confusion en V8"},
+			{"<= 116.0.5845.96", "HIGH", "CVE-2023-4863", "Heap buffer overflow en WebRTC"},
+		},
+		"Microsoft Edge": {
+			{"<= 114.0.1823.41", "HIGH", "CVE-2023-3079", "Vulnerabilidad en Edge"},
+			{"<= 116.0.1938.55", "HIGH", "CVE-2023-4863", "Vulnerabilidad en Edge"},
+		},
+		"Firefox": {
+			{"<= 114.0.1", "HIGH", "CVE-2023-38408", "Vulnerabilidad en Firefox"},
+			{"<= 115.0.2", "MEDIUM", "CVE-2023-3724", "Vulnerabilidad en Firefox"},
+		},
+		"WinRAR": {
+			{"<= 6.11", "CRITICAL", "CVE-2023-40477", "Vulnerabilidad de código remoto en WinRAR"},
+		},
+		"7-Zip": {
+			{"<= 23.01", "MEDIUM", "CVE-2023-31110", "Vulnerabilidad en 7-Zip"},
+		},
+		"VLC media player": {
+			{"<= 3.0.18", "HIGH", "CVE-2023-37903", "Vulnerabilidad en VLC"},
+		},
+	}
+
+	for _, app := range software.InstalledApps {
+		for vendor, cves := range vulnerableSoftware {
+			if strings.Contains(strings.ToLower(app.Nombre), strings.ToLower(vendor)) {
+				for _, cve := range cves {
+					severity := cve[1]
+					cveID := cve[2]
+					desc := cve[3]
+
+					vuln := Vulnerability{
+						Software:    app.Nombre,
+						Version:     app.Version,
+						Severidad:   severity,
+						CVE:         cveID,
+						Descripcion: desc,
+					}
+					software.Vulnerabilities = append(software.Vulnerabilities, vuln)
+					addReport("SOFTWARE", fmt.Sprintf("VULNERABLE: %s v%s - %s (%s)", app.Nombre, app.Version, cveID, severity), "CRITICAL")
+				}
+			}
+		}
+	}
+
+	if len(software.Vulnerabilities) == 0 {
+		addReport("SOFTWARE", "No se encontraron vulnerabilidades conocidas en el software instalado", "INFO")
+	} else {
+		addReport("SOFTWARE", fmt.Sprintf("ADVERTENCIA: %d vulnerabilidades conocidas detectadas", len(software.Vulnerabilities)), "WARNING")
+	}
 }
