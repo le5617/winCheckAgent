@@ -1,4 +1,4 @@
-# Ciberox Endpoint - Agente de Diagnóstico Windows
+# Ciberox Audit - Agente de Auditoria para Windows
 
 [![Go Version](https://img.shields.io/badge/Go-1.21%2B-blue)](https://go.dev/)
 [![Windows](https://img.shields.io/badge/Windows-10%2F11-blue)](https://www.microsoft.com/windows/)
@@ -18,7 +18,7 @@ Herramienta de auditoría y diagnóstico para sistemas Windows que escanea el eq
 
 ### Opción 1: Descargar binario precompilado
 
-Descarga el archivo `ciberox-endpoint.exe` desde la sección [Releases](https://github.com/le5617/winCheckAgent/releases) y ejecútalo directamente.
+Descarga el archivo `ciberoxAudit.exe` desde la sección [Releases](https://github.com/le5617/winCheckAgent/releases) y ejecútalo directamente.
 
 ### Opción 2: Compilar desde código fuente
 
