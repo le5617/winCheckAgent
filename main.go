@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/shirou/gopsutil/v3/net"
 	"github.com/shirou/gopsutil/v3/process"
+	"golang.org/x/sys/windows/registry"
 )
 
 type ReportEntry struct {
@@ -310,8 +312,9 @@ type Win32QuickFixEngineering struct {
 type Win32Service struct {
 	Name        string
 	DisplayName string
-	Status      string
+	State       string // WMI property name (not Status)
 	StartType   uint32
+	StartMode   string
 }
 
 type Win32UserAccount struct {
@@ -348,6 +351,41 @@ type Win32PnPEntity struct {
 	ClassGuid    string
 }
 
+// root\wmi namespace — SMART failure prediction
+type MSStorageDriverFailurePredictStatus struct {
+	InstanceName   string
+	Active         bool
+	PredictFailure bool
+}
+
+// root\StandardCimv2 namespace — Windows Firewall profiles
+type MsftNetFirewallProfile struct {
+	Name    string
+	Enabled bool
+}
+
+// root\SecurityCenter2 namespace — AV products
+type AntiVirusProduct struct {
+	DisplayName            string
+	ProductState           uint32
+	PathToSignedProductExe string
+}
+
+// root\SecurityCenter2 namespace — Firewall products (3rd party)
+type Win32FirewallProduct struct {
+	DisplayName  string
+	ProductState uint32
+}
+
+// Win32_NetworkAdapterConfiguration — adapters with IP enabled
+type Win32NetworkAdapterConfiguration struct {
+	Description      string
+	IPAddress        []string
+	MACAddress       string
+	IPEnabled        bool
+	DefaultIPGateway []string
+}
+
 func queryWMI(class string, dst interface{}) error {
 	return wmi.Query(class, dst)
 }
@@ -357,8 +395,30 @@ func runWMIQuery(class string, dst interface{}) bool {
 	return err == nil
 }
 
-func runPowerShell(command string) string {
-	return ""
+// batteryStatusToString convierte el código numérico de BatteryStatus WMI a texto legible.
+func batteryStatusToString(status uint32) string {
+	switch status {
+	case 1:
+		return "Desconectado"
+	case 2:
+		return "Conectado - Alta carga"
+	case 3:
+		return "Conectado - Baja carga"
+	case 4:
+		return "Conectado - Cargando"
+	case 5:
+		return "Conectado - Cargado"
+	case 6:
+		return "Conectado - Carga baja"
+	case 7, 8:
+		return "Conectado - Cargando"
+	case 9, 10:
+		return "Desconocido"
+	case 11:
+		return "Cargando"
+	default:
+		return "Desconocido"
+	}
 }
 
 type Win32ComputerSystem struct {
@@ -527,38 +587,16 @@ func getWMIBatteryInfo() {
 		hardware.Bateria.CargaPorcent = float64(b.EstimatedChargeRemaining)
 		hardware.Bateria.TiempoRestante = int(b.EstimatedRunTime)
 
-		switch b.BatteryStatus {
-		case 1:
-			hardware.Bateria.Estado = "Desconectado"
-		case 2:
-			hardware.Bateria.Estado = "Conectado - Alta carga"
-		case 3:
-			hardware.Bateria.Estado = "Conectado - Baja carga"
-		case 4:
-			hardware.Bateria.Estado = "Conectado - Cargando"
-		case 5:
-			hardware.Bateria.Estado = "Conectado - Cargado"
-		case 6:
-			hardware.Bateria.Estado = "Conectado - Carga baja"
-		case 7:
-			hardware.Bateria.Estado = "Conectado - Cargando"
-		case 8:
-			hardware.Bateria.Estado = "Conectado - Cargando"
-		case 9:
-			hardware.Bateria.Estado = "Desconocido"
-		case 10:
-			hardware.Bateria.Estado = "Desconectado"
-		case 11:
-			hardware.Bateria.Estado = "Cargando"
-		default:
-			hardware.Bateria.Estado = "Desconocido"
-		}
+		hardware.Bateria.Estado = batteryStatusToString(b.BatteryStatus)
 
 		hardware.Bateria.CapacidadDiseno = int64(b.DesignCapacity)
 		hardware.Bateria.CapacidadActual = int64(b.FullChargeCapacity)
 
 		if b.DesignCapacity > 0 && b.FullChargeCapacity > 0 {
 			hardware.Bateria.SaludPorcent = float64(b.FullChargeCapacity) / float64(b.DesignCapacity) * 100
+			if hardware.Bateria.SaludPorcent < 80 {
+				addReport("HARDWARE", fmt.Sprintf("ALERTA: Salud de batería baja (%.1f%%). Considerar reemplazo", hardware.Bateria.SaludPorcent), "WARNING")
+			}
 		}
 	}
 }
@@ -710,24 +748,57 @@ func checkNetwork() {
 
 	ifs, _ := net.Interfaces()
 	for _, iface := range ifs {
-		addReport("RED", fmt.Sprintf("Interfaz: %s - MAC: %s", iface.Name, iface.HardwareAddr), "INFO")
+		var ips []string
+		for _, addr := range iface.Addrs {
+			ips = append(ips, addr.Addr)
+		}
+		statusStr := "down"
+		if iface.HardwareAddr != "" || len(ips) > 0 {
+			statusStr = "up"
+		}
+		ni := NetworkInterface{
+			Name:        iface.Name,
+			IPAddresses: ips,
+			MAC:         iface.HardwareAddr,
+			Status:      statusStr,
+		}
+		red.Interfaces = append(red.Interfaces, ni)
+		addReport("RED", fmt.Sprintf("Interfaz: %s - MAC: %s - IPs: %v", iface.Name, iface.HardwareAddr, ips), "INFO")
 	}
 }
 
 func checkNetworkAdvanced() {
 	addReport("RED_AVANZADA", "=== VERIFICACION AVANZADA DE RED ===", "INFO")
 
-	ifs, _ := net.Interfaces()
+	var adapters []Win32NetworkAdapterConfiguration
 	hasConnection := false
-	for _, iface := range ifs {
-		addReport("RED_AVANZADA", fmt.Sprintf("Interfaz: %s", iface.Name), "INFO")
-		hasConnection = true
+
+	err := wmi.Query(
+		"SELECT Description, IPAddress, MACAddress, IPEnabled, DefaultIPGateway FROM Win32_NetworkAdapterConfiguration WHERE IPEnabled = TRUE",
+		&adapters,
+	)
+	if err == nil {
+		for _, adapter := range adapters {
+			for _, ip := range adapter.IPAddress {
+				if ip == "" || strings.HasPrefix(ip, "127.") || strings.HasPrefix(ip, "::1") {
+					continue
+				}
+				addReport("RED_AVANZADA", fmt.Sprintf("Interfaz: %s - IP: %s - MAC: %s",
+					adapter.Description, ip, adapter.MACAddress), "INFO")
+				hasConnection = true
+			}
+			if len(adapter.DefaultIPGateway) > 0 && adapter.DefaultIPGateway[0] != "" {
+				addReport("RED_AVANZADA", fmt.Sprintf("  Gateway predeterminado: %s", adapter.DefaultIPGateway[0]), "INFO")
+			}
+		}
+	} else {
+		addReport("RED_AVANZADA", fmt.Sprintf("Error consultando adaptadores WMI: %v", err), "WARNING")
 	}
 
 	if hasConnection {
 		addReport("RED_AVANZADA", "Conectividad a red: OK", "INFO")
 	} else {
-		addReport("RED_AVANZADA", "Sin conectividad de red", "WARNING")
+		addReport("RED_AVANZADA", "Sin conectividad de red activa detectada", "WARNING")
 	}
 }
 
@@ -778,23 +849,11 @@ func checkProcesses() {
 		}
 	}
 
-	// Sort by CPU
-	for i := 0; i < len(topCPU)-1; i++ {
-		for j := i + 1; j < len(topCPU); j++ {
-			if topCPU[j].cpu > topCPU[i].cpu {
-				topCPU[i], topCPU[j] = topCPU[j], topCPU[i]
-			}
-		}
-	}
+	// Ordenar por CPU descendente
+	sort.Slice(topCPU, func(i, j int) bool { return topCPU[i].cpu > topCPU[j].cpu })
 
-	// Sort by Memory
-	for i := 0; i < len(topMem)-1; i++ {
-		for j := i + 1; j < len(topMem); j++ {
-			if topMem[j].mem > topMem[i].mem {
-				topMem[i], topMem[j] = topMem[j], topMem[i]
-			}
-		}
-	}
+	// Ordenar por memoria descendente
+	sort.Slice(topMem, func(i, j int) bool { return topMem[i].mem > topMem[j].mem })
 
 	addReport("PROCESOS", "Top 10 procesos por CPU:", "INFO")
 	for i := 0; i < min(10, len(topCPU)); i++ {
@@ -807,6 +866,16 @@ func checkProcesses() {
 	}
 
 	addReport("PROCESOS", fmt.Sprintf("Total de procesos: %d", len(procs)), "INFO")
+
+	// Poblar slice global para el JSON
+	for i := 0; i < min(10, len(topCPU)); i++ {
+		procesos = append(procesos, ProcessInfo{
+			Name:       topCPU[i].name,
+			PID:        topCPU[i].pid,
+			CPUPercent: topCPU[i].cpu,
+			MemPercent: topCPU[i].mem,
+		})
+	}
 }
 
 func checkBSOD() {
@@ -827,18 +896,36 @@ func checkSMART() {
 }
 
 func checkMalware() {
-	addReport("MALWARE", "=== ESCANEO DE MALWARE (Windows Defender) ===", "INFO")
+	addReport("MALWARE", "=== ESTADO DEL ANTIVIRUS ===", "INFO")
 
-	var dst []Win32QuickFixEngineering
-	err := wmi.Query("SELECT * FROM Win32_QuickFixEngineering", &dst)
-	if err == nil {
-		addReport("MALWARE", "Windows Defender: Consultando estado...", "INFO")
-		addReport("MALWARE", "Usa WMI para verificar estado de Windows Defender", "INFO")
+	var avProducts []AntiVirusProduct
+	err := wmi.Query("SELECT DisplayName, ProductState FROM AntiVirusProduct", &avProducts, nil, "root\\SecurityCenter2")
+	if err == nil && len(avProducts) > 0 {
+		for _, av := range avProducts {
+			// ProductState: bits 16-23 = estado producto, bits 8-15 = estado firmas
+			stateCode := (av.ProductState >> 16) & 0xFF
+			defStatus := (av.ProductState >> 8) & 0xFF
+			enabled := stateCode == 0x10
+			upToDate := defStatus == 0x00
+
+			statusStr := "Deshabilitado"
+			if enabled {
+				statusStr = "Habilitado"
+			}
+			defStr := "Desactualizado"
+			if upToDate {
+				defStr = "Al día"
+			}
+			level := "INFO"
+			if !enabled || !upToDate {
+				level = "WARNING"
+			}
+			addReport("MALWARE", fmt.Sprintf("Antivirus: %s - Estado: %s - Firmas: %s",
+				av.DisplayName, statusStr, defStr), level)
+		}
 	} else {
-		addReport("MALWARE", "No se pudo obtener estado de Windows Defender", "WARNING")
+		addReport("MALWARE", "No se detectó antivirus o SecurityCenter2 inaccesible", "WARNING")
 	}
-
-	addReport("MALWARE", "Nota: Para verificar Windows Defender usa WMI: root\\SecurityCenter2", "INFO")
 }
 
 func checkDrivers() {
@@ -861,34 +948,67 @@ func checkSystemIntegrity() {
 func checkWindowsUpdate() {
 	addReport("WINDOWS UPDATE", "=== ESTADO DE WINDOWS UPDATE ===", "INFO")
 
+	// Nota: ORDER BY InstalledOn falla porque es un campo nullable *time.Time en WMI
 	var hotfixes []Win32QuickFixEngineering
-	err := wmi.Query("SELECT * FROM Win32_QuickFixEngineering ORDER BY InstalledOn DESC", &hotfixes)
+	err := wmi.Query("SELECT HotFixID, InstalledOn FROM Win32_QuickFixEngineering", &hotfixes)
 	if err == nil && len(hotfixes) > 0 {
-		addReport("WINDOWS UPDATE", fmt.Sprintf("Ultimo parche: %s", hotfixes[0].HotFixID), "INFO")
+		// Buscar el último por fecha manualmente
+		var lastFix Win32QuickFixEngineering
+		for _, hf := range hotfixes {
+			if hf.InstalledOn != nil {
+				if lastFix.InstalledOn == nil || hf.InstalledOn.After(*lastFix.InstalledOn) {
+					lastFix = hf
+				}
+			}
+		}
+		addReport("WINDOWS UPDATE", fmt.Sprintf("Total de parches instalados: %d", len(hotfixes)), "INFO")
+		if lastFix.HotFixID != "" {
+			addReport("WINDOWS UPDATE", fmt.Sprintf("Ultimo parche: %s (%s)",
+				lastFix.HotFixID, lastFix.InstalledOn.Format("2006-01-02")), "INFO")
+		}
 	} else {
-		addReport("WINDOWS UPDATE", "No se pudo obtener información de actualizaciones", "WARNING")
+		addReport("WINDOWS UPDATE", fmt.Sprintf("No se pudo obtener información de actualizaciones: %v", err), "WARNING")
 	}
 }
 
 func checkServices() {
 	addReport("SERVICIOS", "=== SERVICIOS CRITICOS ===", "INFO")
 
+	// Filtrar solo servicios relevant para no requerir admin total
 	var services []Win32Service
-	err := wmi.Query("SELECT Name, DisplayName, Status FROM Win32_Service", &services)
+	err := wmi.Query(
+		"SELECT Name, DisplayName, State, StartMode FROM Win32_Service WHERE StartMode='Auto'",
+		&services,
+	)
+	if err != nil {
+		// Fallback: query mínima sin filtro
+		err = wmi.Query("SELECT Name, DisplayName, State, StartMode FROM Win32_Service", &services)
+	}
 	if err == nil {
 		stoppedCount := 0
 		for _, svc := range services {
-			if svc.Status != "Running" {
+			// En WMI la propiedad de Win32_Service es 'State' (no Status)
+			state := svc.State
+			if state == "" {
+				state = "Unknown"
+			}
+			if state != "Running" {
 				stoppedCount++
 			}
+			// Guardar en slice global para el JSON
+			servicios = append(servicios, ServiceInfo{
+				Name:      svc.Name,
+				Status:    state,
+				StartType: fmt.Sprintf("%d", svc.StartType),
+			})
 		}
 		if stoppedCount > 0 {
-			addReport("SERVICIOS", fmt.Sprintf("Servicios detenidos: %d", stoppedCount), "WARNING")
+			addReport("SERVICIOS", fmt.Sprintf("Servicios de inicio automático no activos: %d", stoppedCount), "WARNING")
 		} else {
-			addReport("SERVICIOS", "Todos los servicios activos", "INFO")
+			addReport("SERVICIOS", fmt.Sprintf("Servicios monitorizados: %d activos", len(services)), "INFO")
 		}
 	} else {
-		addReport("SERVICIOS", "No se pudieron obtener los servicios", "WARNING")
+		addReport("SERVICIOS", fmt.Sprintf("No se pudieron obtener los servicios: %v", err), "WARNING")
 	}
 }
 
@@ -1124,71 +1244,6 @@ func main() {
 	runFullDiagnostic()
 }
 
-func getComputerInfo() {
-	output := runPowerShell("(Get-CimInstance Win32_ComputerSystem).Name")
-	if output != "" {
-		equipo.NombreEquipo = output
-		addReport("EQUIPO", fmt.Sprintf("Nombre del equipo: %s", output), "INFO")
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Domain")
-	if output != "" {
-		equipo.Dominio = output
-		addReport("EQUIPO", fmt.Sprintf("Dominio/Grupo de trabajo: %s", output), "INFO")
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).DomainRole")
-	if output != "" {
-		role := ""
-		switch output {
-		case "0":
-			role = "Estación de trabajo"
-		case "1":
-			role = "Estación de trabajo (miembro de dominio)"
-		case "2":
-			role = "Servidor miembro"
-		case "3":
-			role = "Servidor miembro (miembro de dominio)"
-		case "4":
-			role = "Controlador de dominio"
-		case "5":
-			role = "Controlador de dominio (primario)"
-		}
-		if role != "" {
-			equipo.Rol = role
-			addReport("EQUIPO", fmt.Sprintf("Rol: %s", role), "INFO")
-		}
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_OperatingSystem).Caption")
-	if output != "" {
-		equipo.SistemaOperativo = output
-		addReport("EQUIPO", fmt.Sprintf("Sistema operativo: %s", output), "INFO")
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_OperatingSystem).Version")
-	if output != "" {
-		equipo.Version = output
-		addReport("EQUIPO", fmt.Sprintf("Versión: %s", output), "INFO")
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Manufacturer")
-	if output != "" {
-		equipo.Fabricante = output
-		addReport("EQUIPO", fmt.Sprintf("Fabricante: %s", output), "INFO")
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_ComputerSystem).Model")
-	if output != "" {
-		addReport("EQUIPO", fmt.Sprintf("Modelo: %s", output), "INFO")
-	}
-
-	output = runPowerShell("(Get-CimInstance Win32_BIOS).SerialNumber")
-	if output != "" {
-		addReport("EQUIPO", fmt.Sprintf("Número de serie: %s", output), "INFO")
-	}
-}
-
 func getListeningPorts() {
 	addReport("SEGURIDAD", "=== PUERTOS EN ESCUCHA ===", "INFO")
 
@@ -1238,17 +1293,29 @@ func getListeningPorts() {
 			service = "desconocido"
 		}
 
+		isSuspicious := false
 		level := "INFO"
 		msg := fmt.Sprintf("Puerto %s (%s) - Proceso: %s", port, service, proc)
 
 		for _, susp := range suspiciousPorts {
 			if port == susp {
+				isSuspicious = true
 				level = "CRITICAL"
 				msg = fmt.Sprintf("PUERTO SOSPECHOSO: %s", msg)
 				break
 			}
 		}
 		addReport("SEGURIDAD", msg, level)
+
+		// Poblar struct de seguridad para el JSON
+		portNum := 0
+		fmt.Sscanf(port, "%d", &portNum)
+		seguridad.ListeningPorts = append(seguridad.ListeningPorts, PortInfo{
+			Port:       portNum,
+			Service:    service,
+			Process:    proc,
+			Sospechoso: isSuspicious,
+		})
 	}
 
 	if len(ports) == 0 {
@@ -1260,16 +1327,32 @@ func getSecurityPatches() {
 	addReport("SEGURIDAD", "=== PARCHES DE SEGURIDAD ===", "INFO")
 
 	var hotfixes []Win32QuickFixEngineering
-	err := wmi.Query("SELECT * FROM Win32_QuickFixEngineering ORDER BY InstalledOn DESC", &hotfixes)
+	// Sin ORDER BY: InstalledOn es *time.Time nullable y falla en WMI
+	err := wmi.Query("SELECT HotFixID, InstalledOn, FixComments FROM Win32_QuickFixEngineering", &hotfixes)
 	if err == nil && len(hotfixes) > 0 {
-		for i := 0; i < min(10, len(hotfixes)); i++ {
-			addReport("SEGURIDAD", fmt.Sprintf("HotFix: %s", hotfixes[i].HotFixID), "INFO")
+		var lastFix Win32QuickFixEngineering
+		for i, hf := range hotfixes {
+			if hf.InstalledOn != nil && (lastFix.InstalledOn == nil || hf.InstalledOn.After(*lastFix.InstalledOn)) {
+				lastFix = hotfixes[i]
+			}
+			// Poblar struct de seguridad
+			patch := SecurityPatch{
+				HotFixID:    hf.HotFixID,
+				Descripcion: hf.FixComments,
+			}
+			if hf.InstalledOn != nil {
+				patch.Instalado = hf.InstalledOn.Format("2006-01-02")
+			}
+			if i < 20 { // limitar a 20 en JSON
+				seguridad.SecurityPatches = append(seguridad.SecurityPatches, patch)
+			}
 		}
-
-		if hotfixes[0].InstalledOn != nil {
-			days := time.Since(*hotfixes[0].InstalledOn).Hours() / 24
-			addReport("SEGURIDAD", fmt.Sprintf("Días desde último parche: %.0f", days), "INFO")
-
+		addReport("SEGURIDAD", fmt.Sprintf("Total parches instalados: %d", len(hotfixes)), "INFO")
+		if lastFix.HotFixID != "" && lastFix.InstalledOn != nil {
+			days := time.Since(*lastFix.InstalledOn).Hours() / 24
+			seguridad.DiasSinParchar = int(days)
+			addReport("SEGURIDAD", fmt.Sprintf("Último parche: %s (%s) - hace %.0f días",
+				lastFix.HotFixID, lastFix.InstalledOn.Format("2006-01-02"), days), "INFO")
 			if days > 30 {
 				addReport("SEGURIDAD", fmt.Sprintf("ALERTA: %.0f días sin parches de seguridad", days), "CRITICAL")
 			} else if days > 14 {
@@ -1277,7 +1360,7 @@ func getSecurityPatches() {
 			}
 		}
 	} else {
-		addReport("SEGURIDAD", "No se pudieron obtener los parches", "WARNING")
+		addReport("SEGURIDAD", fmt.Sprintf("No se pudieron obtener los parches: %v", err), "WARNING")
 	}
 }
 
@@ -1307,9 +1390,19 @@ func getUserList() {
 				status = "Deshabilitado"
 			}
 			addReport("SEGURIDAD", fmt.Sprintf("Usuario: %s - %s", user.Name, status), "INFO")
+			// Poblar struct de seguridad para el JSON
+			logon := ""
+			if user.LastLogon != nil {
+				logon = user.LastLogon.Format("2006-01-02 15:04")
+			}
+			seguridad.Users = append(seguridad.Users, UserInfo{
+				Nombre:      user.Name,
+				Habilitado:  !user.Disabled,
+				UltimoLogin: logon,
+			})
 		}
 	} else {
-		addReport("SEGURIDAD", "No se pudieron obtener usuarios", "WARNING")
+		addReport("SEGURIDAD", fmt.Sprintf("No se pudieron obtener usuarios: %v", err), "WARNING")
 	}
 }
 
@@ -1321,9 +1414,10 @@ func getUSBDevices() {
 	if err == nil && len(usbDevices) > 0 {
 		for _, dev := range usbDevices {
 			addReport("SEGURIDAD", fmt.Sprintf("USB: %s - %s", dev.Name, dev.Status), "INFO")
+			seguridad.USBDevices = append(seguridad.USBDevices, dev.Name)
 		}
 	} else {
-		addReport("SEGURIDAD", "No se encontraron dispositivos USB", "WARNING")
+		addReport("SEGURIDAD", fmt.Sprintf("No se encontraron dispositivos USB: %v", err), "INFO")
 	}
 }
 
@@ -1335,6 +1429,7 @@ func getPrinters() {
 	if err == nil && len(printers) > 0 {
 		for _, p := range printers {
 			addReport("SEGURIDAD", fmt.Sprintf("Impresora: %s - %s", p.Name, p.Status), "INFO")
+			seguridad.Printers = append(seguridad.Printers, fmt.Sprintf("%s (%s)", p.Name, p.Status))
 		}
 	} else {
 		addReport("SEGURIDAD", "No se detectaron impresoras", "INFO")
@@ -1343,12 +1438,54 @@ func getPrinters() {
 
 func getFirewallStatus() {
 	addReport("SEGURIDAD", "=== ESTADO DEL FIREWALL ===", "INFO")
-	addReport("SEGURIDAD", "El estado del firewall requiere privilegios de administrador", "INFO")
-	addReport("SEGURIDAD", "Usa Windows Security > Firewall para verificar manualmente", "INFO")
+
+	// Productos de firewall de terceros (SecurityCenter2)
+	var fwProducts []Win32FirewallProduct
+	if err := wmi.Query("SELECT DisplayName, ProductState FROM FirewallProduct", &fwProducts, nil, "root\\SecurityCenter2"); err == nil && len(fwProducts) > 0 {
+		for _, fw := range fwProducts {
+			stateCode := (fw.ProductState >> 16) & 0xFF
+			enabled := stateCode == 0x10
+			statusStr := "Deshabilitado"
+			if enabled {
+				statusStr = "Habilitado"
+			}
+			level := "INFO"
+			if !enabled {
+				level = "WARNING"
+			}
+			addReport("SEGURIDAD", fmt.Sprintf("Firewall (3º): %s - Estado: %s", fw.DisplayName, statusStr), level)
+		}
+	}
+
+	// Perfiles del Firewall de Windows (root\StandardCimv2) — poblar FirewallStatus del JSON
+	var fwProfiles []MsftNetFirewallProfile
+	if err := wmi.Query("SELECT Name, Enabled FROM MSFT_NetFirewallProfile", &fwProfiles, nil, "root\\StandardCimv2"); err == nil && len(fwProfiles) > 0 {
+		for _, p := range fwProfiles {
+			status := "Deshabilitado"
+			if p.Enabled {
+				status = "Habilitado"
+			}
+			level := "INFO"
+			if !p.Enabled {
+				level = "WARNING"
+			}
+			addReport("SEGURIDAD", fmt.Sprintf("Firewall Windows - Perfil [%s]: %s", p.Name, status), level)
+			// Mapear perfil al struct FirewallStatus
+			switch strings.ToLower(p.Name) {
+			case "domain":
+				seguridad.FirewallStatus.Domain = p.Enabled
+			case "public":
+				seguridad.FirewallStatus.Public = p.Enabled
+			case "private":
+				seguridad.FirewallStatus.Private = p.Enabled
+			}
+		}
+	} else {
+		addReport("SEGURIDAD", "No se pudo consultar perfiles del Firewall de Windows", "WARNING")
+	}
 }
 
 func runSecurityAudit() {
-	getComputerInfo()
 	getListeningPorts()
 	getSecurityPatches()
 	getPasswordPolicy()
@@ -1372,317 +1509,139 @@ func collectHardwareInfo() {
 	getWMIBatteryInfo()
 	getWMIDiskDrive()
 	getDiskHealth()
-	getBatteryHealth()
-	getBIOSInfo()
-	getProcessorInfo()
-	getRAMInfo()
 }
 
+// getDiskHealth consulta el estado SMART de los discos usando WMI nativo.
+// Usa MSStorageDriver_FailurePredictStatus (root\wmi) para predicción de fallos
+// y Win32_DiskDrive para datos de modelo/serie/tipo.
 func getDiskHealth() {
 	addReport("HARDWARE", "=== SALUD DEL DISCO (S.M.A.R.T.) ===", "INFO")
 
-	output := runPowerShell("Get-PhysicalDisk | Select-Object FriendlyName, SerialNumber, MediaType, OperationalStatus, HealthStatus | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		var disks []map[string]interface{}
-		if err := json.Unmarshal([]byte(output), &disks); err == nil {
-			for _, disk := range disks {
-				diskInfo := DiskInfo{}
-
-				if name, ok := disk["FriendlyName"].(string); ok {
-					diskInfo.Modelo = name
-				}
-				if serial, ok := disk["SerialNumber"].(string); ok {
-					diskInfo.NumeroSerie = serial
-				}
-				if status, ok := disk["OperationalStatus"].(string); ok {
-					diskInfo.Estado = status
-				}
-				if health, ok := disk["HealthStatus"].(string); ok {
-					if health == "Healthy" {
-						diskInfo.SaludPorcent = 100
-					} else {
-						diskInfo.SaludPorcent = 0
-					}
-				}
-
-				smartData := runPowerShell(fmt.Sprintf("Get-StorageReliabilityCounter -PhysicalDisk (Get-PhysicalDisk | Where-Object { $_.FriendlyName -eq '%s' }) | ConvertTo-Json", diskInfo.Modelo))
-				if smartData != "" && smartData != "null" {
-					var smart map[string]interface{}
-					if err := json.Unmarshal([]byte(smartData), &smart); err == nil {
-						if temp, ok := smart["Temperature"].(float64); ok {
-							diskInfo.Temperatura = temp
-						}
-						if readErrors, ok := smart["ReadErrorCount"].(float64); ok {
-							diskInfo.LecturaErrores = int64(readErrors)
-						}
-						if reallocated, ok := smart["ReallocatedSectorsCount"].(float64); ok {
-							diskInfo.Reasignados = int64(reallocated)
-						}
-						if pending, ok := smart["PendingSectorCount"].(float64); ok {
-							diskInfo.Pendientes = int64(pending)
-						}
-					}
-				}
-
-				hardware.Discos = append(hardware.Discos, diskInfo)
-				addReport("HARDWARE", fmt.Sprintf("Disco: %s - Serie: %s - Estado: %s", diskInfo.Modelo, diskInfo.NumeroSerie, diskInfo.Estado), "INFO")
-
-				if diskInfo.Temperatura > 0 {
-					addReport("HARDWARE", fmt.Sprintf("  Temperatura: %.1f°C", diskInfo.Temperatura), "INFO")
-				}
-				if diskInfo.Reasignados > 0 || diskInfo.Pendientes > 0 {
-					addReport("HARDWARE", fmt.Sprintf("  ALERTA: Sectores reasignados: %d, Pendientes: %d", diskInfo.Reasignados, diskInfo.Pendientes), "WARNING")
-				}
-			}
+	// Mapa de predicciones de fallo SMART por InstanceName
+	smartFailMap := make(map[string]bool)
+	var smartPredictions []MSStorageDriverFailurePredictStatus
+	if err := wmi.Query(
+		"SELECT InstanceName, PredictFailure FROM MSStorageDriver_FailurePredictStatus",
+		&smartPredictions, nil, "root\\wmi",
+	); err == nil {
+		for _, s := range smartPredictions {
+			key := strings.ToLower(s.InstanceName)
+			smartFailMap[key] = s.PredictFailure
 		}
+		addReport("HARDWARE", fmt.Sprintf("SMART: %d unidades monitorizadas", len(smartPredictions)), "INFO")
+	} else {
+		addReport("HARDWARE", "SMART vía WMI no disponible (requiere privilegios de administrador)", "INFO")
 	}
 
-	output = runPowerShell("Get-WmiObject -Class Win32_DiskDrive | Select-Object Model, SerialNumber, Size, Status | ConvertTo-Json")
-	if output != "" && output != "null" {
-		var disks []map[string]interface{}
-		if err := json.Unmarshal([]byte(output), &disks); err == nil {
-			for _, disk := range disks {
-				if len(hardware.Discos) == 0 || hardware.Discos[0].Modelo == "" {
-					diskInfo := DiskInfo{}
-					if model, ok := disk["Model"].(string); ok {
-						diskInfo.Modelo = model
-					}
-					if serial, ok := disk["SerialNumber"].(string); ok {
-						diskInfo.NumeroSerie = serial
-					}
-					if status, ok := disk["Status"].(string); ok {
-						diskInfo.Estado = status
-					}
-					hardware.Discos = append(hardware.Discos, diskInfo)
-				}
-			}
-		}
-	}
-}
+	// Detalles de discos desde Win32_DiskDrive
+	var drives []Win32DiskDrive
+	if err := wmi.Query(
+		"SELECT Model, SerialNumber, Size, MediaType, Status, InterfaceType FROM Win32_DiskDrive",
+		&drives,
+	); err == nil {
+		for i, d := range drives {
+			modelo := strings.TrimSpace(d.Model)
+			serie := strings.TrimSpace(d.SerialNumber)
 
-func getBatteryHealth() {
-	addReport("HARDWARE", "=== SALUD DE BATERÍA ===", "INFO")
-
-	output := runPowerShell("Get-WmiObject -Class Win32_Battery | Select-Object Name, EstimatedChargeRemaining, EstimatedRunTime, BatteryStatus, DesignCapacity, FullChargeCapacity | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		var battery map[string]interface{}
-		if err := json.Unmarshal([]byte(output), &battery); err == nil {
-			bat := BatteryInfo{}
-
-			if name, ok := battery["Name"].(string); ok {
-				bat.Nombre = name
-			}
-			if charge, ok := battery["EstimatedChargeRemaining"].(float64); ok {
-				bat.CargaPorcent = charge
-			}
-			if runtime, ok := battery["EstimatedRunTime"].(float64); ok {
-				bat.TiempoRestante = int(runtime)
-			}
-			if status, ok := battery["BatteryStatus"].(float64); ok {
-				switch int(status) {
-				case 1:
-					bat.Estado = "Desconectado"
-				case 2:
-					bat.Estado = "Conectado - Alta carga"
-				case 3:
-					bat.Estado = "Conectado - Baja carga"
-				case 4:
-					bat.Estado = "Conectado - Cargando"
-				case 5:
-					bat.Estado = "Conectado - Cargado"
-				case 6:
-					bat.Estado = "Conectado - Carga baja"
-				case 7:
-					bat.Estado = "Conectado - Cargando"
-				case 8:
-					bat.Estado = "Conectado - Cargando"
-				case 9:
-					bat.Estado = "Desconocido"
-				case 10:
-					bat.Estado = "Desconectado"
-				case 11:
-					bat.Estado = "Cargando"
-				default:
-					bat.Estado = "Desconocido"
-				}
-			}
-			if designCap, ok := battery["DesignCapacity"].(float64); ok {
-				bat.CapacidadDiseno = int64(designCap)
-			}
-			if fullCap, ok := battery["FullChargeCapacity"].(float64); ok {
-				bat.CapacidadActual = int64(fullCap)
-			}
-
-			if bat.CapacidadDiseno > 0 && bat.CapacidadActual > 0 {
-				bat.SaludPorcent = float64(bat.CapacidadActual) / float64(bat.CapacidadDiseno) * 100
-			}
-
-			output = runPowerShell("Get-WmiObject -Class BatteryFullChargedCapacity | Select-Object FullChargedCapacity")
-			if output != "" {
-				var cycles map[string]interface{}
-				if err := json.Unmarshal([]byte(output), &cycles); err == nil {
-					if fc, ok := cycles["FullChargedCapacity"].(float64); ok {
-						bat.CapacidadActual = int64(fc)
-						if bat.CapacidadDiseno > 0 {
-							bat.SaludPorcent = float64(bat.CapacidadActual) / float64(bat.CapacidadDiseno) * 100
-						}
-					}
+			// Buscar predicción SMART para este disco
+			predictFail := false
+			for key, fail := range smartFailMap {
+				if strings.Contains(key, strings.ToLower(modelo)) {
+					predictFail = fail
+					break
 				}
 			}
 
-			hardware.Bateria = bat
-
-			addReport("HARDWARE", fmt.Sprintf("Batería: %s", bat.Nombre), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Carga: %.0f%%", bat.CargaPorcent), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Estado: %s", bat.Estado), "INFO")
-
-			if bat.SaludPorcent > 0 {
-				addReport("HARDWARE", fmt.Sprintf("Salud de batería: %.1f%%", bat.SaludPorcent), "INFO")
-				if bat.SaludPorcent < 80 {
-					addReport("HARDWARE", fmt.Sprintf("ALERTA: Salud de batería baja (%.1f%%). Considerar reemplazo", bat.SaludPorcent), "WARNING")
-				}
+			estado := d.Status
+			level := "INFO"
+			if predictFail {
+				estado = "PredFail - FALLO PREDICHO"
+				level = "CRITICAL"
+			} else if d.Status != "OK" {
+				level = "WARNING"
 			}
 
-			if bat.CapacidadDiseno > 0 && bat.CapacidadActual > 0 {
-				addReport("HARDWARE", fmt.Sprintf("Capacidad diseño: %d mWh", bat.CapacidadDiseno), "INFO")
-				addReport("HARDWARE", fmt.Sprintf("Capacidad actual: %d mWh", bat.CapacidadActual), "INFO")
+			addReport("HARDWARE",
+				fmt.Sprintf("Disco [%d]: %s | Serie: %s | Tipo: %s | Interfaz: %s | Estado: %s",
+					i+1, modelo, serie, d.MediaType, d.InterfaceType, estado), level)
+
+			if predictFail {
+				addReport("HARDWARE", fmt.Sprintf("  ⚠️ ALERTA SMART: Fallo inminente predicho en disco '%s'", modelo), "CRITICAL")
+			}
+
+			// Actualizar entrada existente (ya creada por getWMIDiskDrive) o añadir nueva
+			updated := false
+			for j := range hardware.Discos {
+				if hardware.Discos[j].Modelo == modelo {
+					hardware.Discos[j].Estado = estado
+					updated = true
+					break
+				}
+			}
+			if !updated {
+				hardware.Discos = append(hardware.Discos, DiskInfo{
+					Modelo:      modelo,
+					NumeroSerie: serie,
+					Estado:      estado,
+				})
 			}
 		}
 	} else {
-		addReport("HARDWARE", "No se detectó batería (equipo de escritorio)", "INFO")
+		addReport("HARDWARE", "No se pudieron leer discos vía Win32_DiskDrive", "WARNING")
+	}
+
+	if len(hardware.Discos) == 0 {
+		addReport("HARDWARE", "No se detectaron discos físicos", "WARNING")
 	}
 }
 
-func getBIOSInfo() {
-	addReport("HARDWARE", "=== INFORMACIÓN BIOS ===", "INFO")
-
-	output := runPowerShell("Get-WmiObject -Class Win32_BIOS | Select-Object Manufacturer, Name, Version, SerialNumber, ReleaseDate | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		var bios map[string]interface{}
-		if err := json.Unmarshal([]byte(output), &bios); err == nil {
-			b := BIOSInfo{}
-			if mfr, ok := bios["Manufacturer"].(string); ok {
-				b.Fabricante = mfr
-			}
-			if name, ok := bios["Name"].(string); ok {
-				b.Version = name
-			}
-			if ver, ok := bios["Version"].(string); ok {
-				b.Version = ver
-			}
-			if serial, ok := bios["SerialNumber"].(string); ok {
-				b.NumeroSerie = serial
-			}
-			if date, ok := bios["ReleaseDate"].(string); ok {
-				b.Fecha = date
-			}
-			hardware.BIOS = b
-
-			addReport("HARDWARE", fmt.Sprintf("Fabricante: %s", b.Fabricante), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Versión: %s", b.Version), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Número de serie: %s", b.NumeroSerie), "INFO")
-
-			if equipo.NumeroSerie == "" {
-				equipo.NumeroSerie = b.NumeroSerie
-			}
-		}
-	}
-}
-
-func getProcessorInfo() {
-	addReport("HARDWARE", "=== PROCESADOR ===", "INFO")
-
-	output := runPowerShell("Get-WmiObject -Class Win32_Processor | Select-Object Name, Manufacturer, NumberOfCores, NumberOfLogicalProcessors, MaxClockSpeed, ProcessorId | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		var cpu map[string]interface{}
-		if err := json.Unmarshal([]byte(output), &cpu); err == nil {
-			p := ProcessorInfo{}
-			if name, ok := cpu["Name"].(string); ok {
-				p.Nombre = strings.TrimSpace(name)
-			}
-			if mfr, ok := cpu["Manufacturer"].(string); ok {
-				p.Fabricante = mfr
-			}
-			if cores, ok := cpu["NumberOfCores"].(float64); ok {
-				p.Nucleos = int(cores)
-			}
-			if threads, ok := cpu["NumberOfLogicalProcessors"].(float64); ok {
-				p.Threads = int(threads)
-			}
-			if freq, ok := cpu["MaxClockSpeed"].(float64); ok {
-				p.FrecuenciaMax = int(freq)
-			}
-			if id, ok := cpu["ProcessorId"].(string); ok {
-				p.Identificador = id
-			}
-			hardware.Procesador = p
-
-			addReport("HARDWARE", fmt.Sprintf("Procesador: %s", p.Nombre), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Núcleos: %d, Hilos: %d", p.Nucleos, p.Threads), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Frecuencia máxima: %d MHz", p.FrecuenciaMax), "INFO")
-		}
-	}
-}
-
-func getRAMInfo() {
-	addReport("HARDWARE", "=== MEMORIA RAM ===", "INFO")
-
-	output := runPowerShell("Get-WmiObject -Class Win32_PhysicalMemory | Select-Object Capacity, Speed, MemoryType, FormFactor | ConvertTo-Json")
-
-	if output != "" && output != "null" {
-		var mem []map[string]interface{}
-		if err := json.Unmarshal([]byte(output), &mem); err == nil {
-			var totalRAM int64
-			var velocidad int
-			slots := 0
-
-			for _, m := range mem {
-				if cap, ok := m["Capacity"].(float64); ok {
-					totalRAM += int64(cap)
-					slots++
-				}
-				if speed, ok := m["Speed"].(float64); ok {
-					velocidad = int(speed)
-				}
-			}
-
-			r := RAMInfo{
-				TotalGB:     float64(totalRAM) / (1024 * 1024 * 1024),
-				SlotsUsados: slots,
-				Velocidad:   velocidad,
-			}
-			hardware.RAM = r
-
-			addReport("HARDWARE", fmt.Sprintf("Total RAM: %.1f GB", r.TotalGB), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Slots utilizados: %d", r.SlotsUsados), "INFO")
-			addReport("HARDWARE", fmt.Sprintf("Velocidad: %d MHz", r.Velocidad), "INFO")
-		}
-	}
-}
-
+// getInstalledSoftware lee las aplicaciones instaladas del Registro de Windows
+// (método rápido y fiable, a diferencia de Win32_Product que es muy lento).
 func getInstalledSoftware() {
 	addReport("SOFTWARE", "=== APLICACIONES INSTALADAS ===", "INFO")
 
-	var products []Win32Product
-	err := wmi.Query("SELECT Name, Version, Vendor FROM Win32_Product", &products)
-	if err == nil && len(products) > 0 {
-		for _, p := range products {
-			app := InstalledApp{
-				Nombre:  p.Name,
-				Version: p.Version,
-				Editor:  p.Vendor,
-			}
-			software.InstalledApps = append(software.InstalledApps, app)
-		}
-		addReport("SOFTWARE", fmt.Sprintf("Total aplicaciones instaladas: %d", len(software.InstalledApps)), "INFO")
-	} else {
-		addReport("SOFTWARE", "Win32_Product no disponible, usa inventario manual", "INFO")
-		addReport("SOFTWARE", "Total aplicaciones: (consultar registro)", "INFO")
+	uninstallKeys := []string{
+		`SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`,
+		`SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`,
 	}
+	roots := []registry.Key{registry.LOCAL_MACHINE, registry.CURRENT_USER}
+
+	seen := make(map[string]bool)
+	for _, root := range roots {
+		for _, keyPath := range uninstallKeys {
+			k, err := registry.OpenKey(root, keyPath, registry.ENUMERATE_SUB_KEYS|registry.READ)
+			if err != nil {
+				continue
+			}
+			subkeys, _ := k.ReadSubKeyNames(-1)
+			k.Close()
+			for _, sub := range subkeys {
+				subK, err := registry.OpenKey(root, keyPath+"\\"+sub, registry.QUERY_VALUE)
+				if err != nil {
+					continue
+				}
+				name, _, _ := subK.GetStringValue("DisplayName")
+				version, _, _ := subK.GetStringValue("DisplayVersion")
+				publisher, _, _ := subK.GetStringValue("Publisher")
+				installDate, _, _ := subK.GetStringValue("InstallDate")
+				subK.Close()
+				if name == "" || seen[name+version] {
+					continue
+				}
+				seen[name+version] = true
+				app := InstalledApp{
+					Nombre:    strings.TrimSpace(name),
+					Version:   version,
+					Editor:    publisher,
+					FechaInst: installDate,
+				}
+				software.InstalledApps = append(software.InstalledApps, app)
+			}
+		}
+	}
+
+	addReport("SOFTWARE", fmt.Sprintf("Total aplicaciones instaladas: %d", len(software.InstalledApps)), "INFO")
+	seguridad.Software.InstalledApps = software.InstalledApps
 }
 
 func getAutorunEntries() {
@@ -1768,10 +1727,6 @@ func getChromeExtensionsFromPath(basePath string) []BrowserExt {
 	}
 
 	return exts
-}
-
-func getEdgeExtensions(basePath string) []BrowserExt {
-	return getChromeExtensionsFromPath(basePath)
 }
 
 func checkVulnerabilities() {
